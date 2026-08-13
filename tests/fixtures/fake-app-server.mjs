@@ -11,6 +11,9 @@ const failInterrupt = process.argv.includes("--fail-interrupt");
 const failTurnStart = process.argv.includes("--fail-turn-start");
 const invalidTurnStart = process.argv.includes("--invalid-turn-start");
 const reportPid = process.argv.includes("--report-pid");
+const requiredClientVersion = process.argv
+  .find((argument) => argument.startsWith("--require-client-version="))
+  ?.split("=")[1];
 const unsubscribeStatusArgument = process.argv.find((argument) =>
   argument.startsWith("--unsubscribe-status="),
 );
@@ -33,6 +36,13 @@ const threadSummary = (cwd = process.cwd()) => ({
 input.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
+    if (requiredClientVersion && message.params?.clientInfo?.version !== requiredClientVersion) {
+      send({
+        id: message.id,
+        error: { code: -32602, message: "unexpected client version" },
+      });
+      return;
+    }
     const respond = () =>
       send({ id: message.id, result: { serverInfo: { name: "fake", version: "1" } } });
     if (initializeDelayMs > 0) setTimeout(respond, initializeDelayMs);

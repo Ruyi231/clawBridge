@@ -1,4 +1,4 @@
-# Phase 2 status
+# ClawBridge 2.0 status
 
 基线日期：2026-08-11
 
@@ -133,3 +133,9 @@
 - 重启当前飞书 Bridge 进程后，从手机执行 `/projects`，确认直接显示 17 个 Desktop 项目及目录，并按名称/编号切换
 - 验证同一对话能否同时被 Codex Desktop 发现并继续
 - 完成 Desktop 与 Bridge 两个独立进程同时写入的故障演练
+
+## 2.0 发布状态
+
+- npm 软件包版本和 App Server `clientInfo.version` 已统一为 `2.0.0`
+- 2.0 数据库迁移版本为 v10，旧数据只做增量扩展，不在启动迁移中删除历史
+- 发布与回滚步骤、飞书权限检查和真实手机验收顺序见 `docs/RELEASE_2.0.md`

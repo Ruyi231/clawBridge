@@ -1,4 +1,4 @@
-# ClawBridge
+# ClawBridge 2.0
 
 ClawBridge 是一个运行在 Windows 本机的单用户控制桥：它通过飞书长连接接收手机消息，将任务送入本机 Codex App Server，再把结果发回飞书。电脑无需开放公网端口。
 
@@ -112,7 +112,7 @@ projectManagement:
 
 当前卡片 MVP 的项目列表和对话列表每页最多显示 10 条，可用“上一页/下一页”浏览。对话数据仍受 Codex 最近 50 条未归档记录的同步窗口约束；更早记录及其他高级操作可继续使用 `/project list`、`/chat list` 等文本命令。全部原有命令仍保留。
 
-交互卡片只会在机器人单聊中生成。卡片点击仍执行服务端校验：只有 `CLAWBRIDGE_FEISHU_ALLOWED_OPEN_ID` 绑定的用户、从本 Bridge 已成功发出的单聊卡片才能操作。卡片 payload 只接受预定义动作及受格式限制的内部项目/对话 ID，不会作为 shell、Codex 提示词或任意 Bridge 命令执行。
+控制台和选择器卡片只会在机器人单聊中生成；任务流、审批和提问卡片也可回复到已登记项目话题。卡片点击仍执行服务端校验：只有 `CLAWBRIDGE_FEISHU_ALLOWED_OPEN_ID` 绑定的用户、从本 Bridge 已成功发出且 chat/audience 匹配的卡片才能操作；群卡还会再次核对项目群 owner。卡片 payload 只接受预定义动作、一次性交互令牌及受格式限制的内部项目/对话 ID，不会作为 shell、Codex 提示词或任意 Bridge 命令执行。
 
 当前仓库覆盖了卡片解析、渲染、动作路由、授权和持久 outbox 的自动测试，但尚未在真实飞书客户端上完成完整卡片端到端验证。首次启用后应依次现场检查“菜单”、项目选择、表单新建项目、对话选择、新对话、模型设置、停止任务、交还桌面和刷新。
 
@@ -276,3 +276,5 @@ npm test
 - App Server RPC 默认 30 秒超时，完整 Codex 回合默认 10 分钟超时；回合超时后 Bridge 会主动发送 `turn/interrupt`，避免遗留后台任务。
 
 完整路线与 Gate 定义见 [BRIDGE_PLAN.md](BRIDGE_PLAN.md)，当前进度见 [docs/PHASE2_STATUS.md](docs/PHASE2_STATUS.md)，安全边界见 [docs/SECURITY.md](docs/SECURITY.md)。
+
+从 0.1 升级、数据库备份、飞书权限检查和真实手机验收顺序见 [ClawBridge 2.0 发布与升级](docs/RELEASE_2.0.md)。

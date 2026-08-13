@@ -64,6 +64,10 @@ describe("loadConfig", () => {
     const loaded = await loadConfig(configPath, environment);
 
     expect(loaded.config.projectManagement.codexDesktopProjects).toEqual({ enabled: false });
+    expect(loaded.config.bridge.attachmentDirectory).toBe(
+      path.resolve(path.dirname(configPath), "..", "data/attachments"),
+    );
+    expect(loaded.config.bridge.attachmentMaxBytes).toBe(20 * 1024 * 1024);
   });
 
   it("resolves a relative desktop state file like other local paths", async () => {
