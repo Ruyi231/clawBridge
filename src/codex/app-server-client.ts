@@ -73,6 +73,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly notificationBuffer: JsonRpcMessage[] = [];
+  private readonly locallyStartedEmptyThreads = new Set<string>();
   private serverRequestHandler?: (context: CodexServerRequestContext) => void;
 
   constructor(private readonly options: AppServerOptions) {
@@ -126,10 +127,15 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
     let threadId = input.threadId ?? undefined;
     let newlyStartedThreadId: string | undefined;
     if (threadId) {
-      await this.request("thread/resume", { threadId });
+      if (this.locallyStartedEmptyThreads.has(threadId)) {
+        this.locallyStartedEmptyThreads.delete(threadId);
+      } else {
+        await this.request("thread/resume", { threadId });
+      }
     } else {
       threadId = (await this.startThread(input)).id;
       newlyStartedThreadId = threadId;
+      this.locallyStartedEmptyThreads.delete(threadId);
     }
     if (!threadId)
       throw new BridgeError("CODEX_PROTOCOL_ERROR", "thread/start did not return a thread id");
@@ -217,7 +223,9 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
       throw error;
     }
     try {
-      return extractThreadRead(result);
+      const summary = extractThreadRead(result);
+      this.locallyStartedEmptyThreads.add(summary.id);
+      return summary;
     } catch (error) {
       await this.stopAfterUncertainThreadStart();
       throw new BridgeError("CODEX_PROTOCOL_ERROR", "Invalid thread/start response", false, {
@@ -343,6 +351,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
   async archiveThread(threadId: string): Promise<void> {
     await this.start();
     await this.request("thread/archive", { threadId });
+    this.locallyStartedEmptyThreads.delete(threadId);
   }
 
   async unarchiveThread(threadId: string): Promise<CodexThreadSummary> {
@@ -365,6 +374,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
         ? result.status
         : undefined;
     if (status === "unsubscribed" || status === "notSubscribed" || status === "notLoaded") {
+      this.locallyStartedEmptyThreads.delete(threadId);
       return status;
     }
     throw new BridgeError("CODEX_PROTOCOL_ERROR", "Invalid thread/unsubscribe response", false);
@@ -400,7 +410,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
       child.stderr.on("data", (chunk: Buffer) => this.emit("stderr", chunk.toString("utf8")));
 
       await this.request("initialize", {
-        clientInfo: { name: "clawbridge", title: "ClawBridge", version: "2.0.2" },
+        clientInfo: { name: "clawbridge", title: "ClawBridge", version: "2.0.3" },
         capabilities: {},
       });
       if (this.child !== child) {
@@ -432,6 +442,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
       if (this.startPromise === startPromise) this.startPromise = undefined;
     }
     this.ready = false;
+    this.locallyStartedEmptyThreads.clear();
   }
 
   private observeChild(child: ChildProcessWithoutNullStreams): Promise<void> {

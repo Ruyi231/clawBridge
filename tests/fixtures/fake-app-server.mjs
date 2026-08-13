@@ -23,6 +23,7 @@ let activeThreadId;
 let activeTurnId;
 let threadName = "Fake thread";
 let archived = false;
+let resumeCount = 0;
 
 const threadSummary = (cwd = process.cwd()) => ({
   id: "thread-test",
@@ -74,8 +75,14 @@ input.on("line", (line) => {
       send({ id: message.id, result: { thread: threadSummary(message.params.cwd) } });
     }
   }
-  if (message.method === "thread/resume")
+  if (message.method === "thread/resume") {
+    resumeCount += 1;
     send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+    send({
+      method: "test/resumeObserved",
+      params: { threadId: message.params.threadId, count: resumeCount },
+    });
+  }
   if (message.method === "thread/list")
     send({
       id: message.id,

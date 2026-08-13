@@ -9,7 +9,7 @@ describe("Codex App Server JSONL contract", () => {
   it("identifies the released ClawBridge 2.0 client during initialization", async () => {
     client = new CodexAppServerClient({
       command: process.execPath,
-      args: [path.resolve("tests/fixtures/fake-app-server.mjs"), "--require-client-version=2.0.2"],
+      args: [path.resolve("tests/fixtures/fake-app-server.mjs"), "--require-client-version=2.0.3"],
       requestTimeoutMs: 2_000,
       turnTimeoutMs: 2_000,
     });
@@ -93,6 +93,46 @@ describe("Codex App Server JSONL contract", () => {
         sandbox: "workspaceWrite",
       }),
     ).resolves.toEqual(expect.objectContaining({ id: "thread-test" }));
+  });
+
+  it("starts the first turn of an explicitly-created empty thread without thread/resume", async () => {
+    client = new CodexAppServerClient({
+      command: process.execPath,
+      args: [path.resolve("tests/fixtures/fake-app-server.mjs")],
+      requestTimeoutMs: 2_000,
+      turnTimeoutMs: 2_000,
+    });
+    let resumes = 0;
+    client.on("message", (message) => {
+      if ("method" in message && message.method === "test/resumeObserved") resumes += 1;
+    });
+    const thread = await client.startThread({
+      cwd: process.cwd(),
+      approvalPolicy: "never",
+      sandbox: "workspaceWrite",
+    });
+
+    await expect(
+      client.runTurn({
+        cwd: process.cwd(),
+        prompt: "first task",
+        threadId: thread.id,
+        approvalPolicy: "never",
+        sandbox: "workspaceWrite",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ threadId: thread.id, finalText: "fake result" }));
+    expect(resumes).toBe(0);
+
+    await expect(
+      client.runTurn({
+        cwd: process.cwd(),
+        prompt: "second task",
+        threadId: thread.id,
+        approvalPolicy: "never",
+        sandbox: "workspaceWrite",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ threadId: thread.id }));
+    expect(resumes).toBe(1);
   });
 
   it.each(["unsubscribed", "notSubscribed", "notLoaded"] as const)(
