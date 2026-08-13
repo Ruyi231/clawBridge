@@ -1,0 +1,92 @@
+# Phase 2 status
+
+基线日期：2026-08-11
+
+## 已实现
+
+### 项目管理
+
+- `projects.yaml` 继续作为启动时的项目 bootstrap；运行期创建、导入、启用和停用状态持久化到 SQLite
+- 可选 `codexDesktopProjects.enabled` 已在本机启用：Bridge 只读 Desktop 的 `project-order`/`local-projects`，自动同步当前可见项目名称、顺序和主目录，不要求逐项目授权
+- Desktop 项目与现有静态项目按规范化真实路径合并；自动项目使用保留前缀的稳定内部 ID，移出 Desktop 列表后只停用、不删除历史
+- `/project create <ID> [名称]` 只会在配置的首个 `projectManagement.allowedRoots` 下创建新的直属目录
+- `/project import <ID> <相对路径> [名称]` 只会登记 `allowedRoots` 内已经存在的目录，不接受绝对路径
+- 创建和导入分别受 `allowCreateDirectory`、`allowRegisterExisting` 开关控制；路径会经过 `realpath` 与父子关系校验
+- SQLite 按“飞书 chat + 项目”保存各项目最后选择的对话；`/project use <名称|#编号|ID>` 切回项目时会恢复该项目上次选择的对话
+- 停用项目只改变登记状态，不删除项目目录、Codex 对话或历史索引
+
+### 对话管理
+
+- 对当前项目使用稳定的 App Server API：`thread/start`、`thread/resume`、`thread/list`、`thread/read`、`thread/name/set`、`thread/archive` 和 `thread/unarchive`
+- `/chat new [名称]` 立即创建并选择新对话；普通消息继续当前选择的对话
+- `/chat list [archived|all]` 按当前项目 `cwd` 同步并列出普通或已归档对话
+- `/chat show <编号或ID>` 读取对话历史；`/chat rename`、`/chat archive` 和 `/chat unarchive` 管理名称与归档状态
+- SQLite 为每个项目中的 Codex 对话分配稳定本地编号，例如 `#1`；同步刷新不会改变已分配编号
+- SQLite 也为项目分配稳定本地编号；Desktop 重排只改变列表顺序，不会让原 `#N` 指向其他目录
+- 所有选取、查阅和管理操作都会校验对话 `cwd` 与当前项目真实根目录一致，阻止跨项目绑定
+- 归档当前选中的对话会解除绑定；恢复归档不会自动切换，需再执行 `/chat use <编号或ID>`
+- MVP 列表窗口固定为每次从 Codex 同步最近 50 条未归档对话和最近 50 条已归档对话；飞书端每种列表模式最多显示 50 条，不做自动分页。已索引的更早对话仍可按编号、完整 ID 或已索引前缀使用；全新数据库中超出同步窗口的旧对话需先用完整 Codex 线程 ID 读取，校验 `cwd` 后才会进入索引并获得编号
+- 本机 Codex CLI `0.147.0` 的真实 smoke 中，尚无 turn 的纯空线程不一定出现在 `thread/list`；Bridge 自己通过 `/chat new` 创建的空线程会立即进入 SQLite 索引，其他客户端创建且从未产生 turn 的空线程可能需要完整 ID 才能首次导入
+
+### 队列与并发语义
+
+- 普通消息入队时固化 `projectId` 和当时选择的 `threadId`，后续状态变化不会把已入队任务重定向到其他项目或对话
+- chat 中存在排队或运行中的任务时，切换项目、切换对话和创建新对话会被拒绝
+- 同一 Codex 对话仍使用租约防止 Bridge 内并发写入；活动对话的重命名和归档等操作也会被拒绝
+- `/stop` 关联当前 chat 的活动 `threadId`/`turnId`，通过 `turn/interrupt` 请求中止
+- App Server 子进程异常退出会立即使活动任务失败，不等待 turn 超时
+
+### 飞书交互卡片 MVP
+
+- 发送“菜单”或 `/menu` 会打开手机控制台；普通文本仍作为当前项目和当前对话中的 Codex 任务
+- 控制台提供选择项目、选择已有对话、懒创建新对话、停止任务、交还桌面和刷新状态按钮；对话列表还可查看最近内容
+- “新对话”不要求先输入名称，下一条普通文本会创建并成为该对话的第一项任务
+- 项目卡片和对话卡片每页最多显示 10 条，支持上一页、下一页和当前页刷新；对话仍受每类最近 50 条的 App Server 同步窗口约束
+- 文本命令全部保留，卡片动作复用相同的项目授权、对话归属、任务并发和 Desktop 交还检查
+- 卡片动作只允许预定义的版本化 action，以及经过格式约束的内部项目/对话 ID；payload 不会被当作任意命令或 Codex 提示词执行
+- 卡片回调与消息事件都使用飞书长连接；应用必须订阅 `im.message.receive_v1` 和 `card.action.trigger`。修改权限、事件或回调后需重新发布应用版本，本机代码修改后还需执行 `npm run build` 并重启 Bridge
+
+方法语义参考 [OpenAI 官方 Codex App Server 文档](https://developers.openai.com/codex/app-server)，未依赖实验性的对话分页接口。实际 JSON-RPC wire 字段和枚举以本机 Codex CLI `0.147.0` 运行 `codex app-server generate-json-schema` 生成的 schema 为当前基线，并已用同一二进制完成真实验证。
+
+2026-08-11 的 App Server smoke 覆盖 `initialize`、最小只读回合、新建、命名、历史读取、未归档列表、归档列表、恢复和最终再次归档，所有断言均通过。测试对话最终保持归档。该结论不代表跨版本兼容，也不代表飞书中的旧 Bridge 进程已经重新加载本次构建。
+
+## Codex 版本漂移边界
+
+- 官网当前文档与本机已安装 Codex 可能在 approval、sandbox 等枚举拼写上不同，例如驼峰形式与带连字符形式；wire 实现应以本机生成 schema 和真实请求结果为准
+- 仓库配置枚举与 App Server wire 枚举是两个边界，客户端负责显式映射，不能把网页示例或 YAML 值直接当作 JSONL wire 值
+- Codex CLI/Desktop 升级后必须重新记录版本、运行 `codex app-server generate-json-schema`，并对比方法参数、响应类型及 `approvalPolicy`、`sandbox`、`sandboxPolicy` 等枚举
+- schema 发生变化时，应先同步协议类型、客户端映射、假 App Server 和 contract tests，再运行类型检查、构建和协议测试
+- 每次升级还需在无敏感数据的测试目录重跑真实只读 turn smoke，并重跑新建、列表、查阅、命名、归档和恢复对话的 smoke；全部通过后才能更新已验证版本基线
+
+## 命令与兼容别名
+
+| 新命令                      | 作用                          | 兼容命令及差异                                                |
+| --------------------------- | ----------------------------- | ------------------------------------------------------------- |
+| `/project list`             | 刷新并列出 Desktop 项目与目录 | `/projects` 等价                                              |
+| `/project status`           | 查看当前项目、目录和对话      | `/status` 等价                                                |
+| `/project use <名称或编号>` | 切换项目并恢复上次对话        | `/use` 保留旧语义：切换项目并清空当前对话，下一条任务新建对话 |
+| `/chat new [名称]`          | 立即创建并选择对话            | `/new` 保留旧语义：只解除当前绑定，下一条普通消息再创建对话   |
+| `/chat list`                | 列出当前项目的未归档对话      | `/threads` 等价                                               |
+| `/chat use <编号或ID>`      | 选择已有对话                  | `/resume <ID>` 等价于按 ID 选择                               |
+
+## 自动验证范围
+
+- 新消息创建线程，后续消息继续同一线程，`/new` 后不续接旧线程
+- 动态项目创建/导入的允许根目录、相对路径和连接点逃逸校验
+- Desktop 状态严格解析、主文件失败时 fail-closed（`.bak` 仅诊断）、项目顺序、同路径复用、自动停用及中文/空格名称解析
+- 项目切换恢复各自活动对话，稳定本地编号不会因重新同步改变
+- 新建、列出、查阅、重命名、归档和恢复对话的协议契约
+- 跨项目对话拒绝、活动任务期间切换拒绝及线程租约竞争拒绝
+- `/stop` 中断与 App Server 异常退出处理
+- 卡片 schema、项目/对话列表渲染、回调 payload 解析、非法 action 拒绝、单用户授权和卡片 delivery outbox
+
+2026-08-11 基线验证：`npm run check`、`npm run build`、`npm run format:check` 全部通过；`npm test` 为 12 个测试文件、65 项测试全部通过，并完成真实 App Server smoke。
+
+2026-08-12 Desktop 项目同步增量：`npm run check`、`npm run build`、`npm run format:check` 全部通过；沙箱内 Vitest 因 esbuild `spawn EPERM` 无法启动，经批准在沙箱外完成全量回归，14 个测试文件、84 项测试全部通过。本机真实状态只读 smoke 发现并同步 17/17 个可见项目，所有主目录解析成功。
+
+## 尚待现场验证
+
+- 在真实飞书客户端完成交互卡片 E2E：打开菜单、选择项目/对话、新建对话、刷新、停止任务及交还桌面；当前不能仅凭自动测试宣称该链路已通过
+- 重启当前飞书 Bridge 进程后，从手机执行 `/projects`，确认直接显示 17 个 Desktop 项目及目录，并按名称/编号切换
+- 验证同一对话能否同时被 Codex Desktop 发现并继续
+- 完成 Desktop 与 Bridge 两个独立进程同时写入的故障演练

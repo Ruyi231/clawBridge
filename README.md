@@ -1,0 +1,266 @@
+# ClawBridge
+
+ClawBridge 是一个运行在 Windows 本机的单用户控制桥：它通过飞书长连接接收手机消息，将任务送入本机 Codex App Server，再把结果发回飞书。电脑无需开放公网端口。
+
+当前仓库已完成 Phase 0–2 的本地实现：配置校验、单用户授权、单聊限制、项目白名单、SQLite WAL 队列、全量事件去重、持久 delivery outbox、发送重试、排队任务恢复、线程创建/续接/列表、线程租约、任务中止、飞书文本及控制卡片收发、Codex `stdio` JSONL 客户端、事件归一化、脱敏和基础 Windows 脚本。需要人工批准 Codex 工具调用的审批卡片仍属于后续阶段。
+
+## 环境要求
+
+- Windows 10/11
+- Node.js 22 或更新版本
+- 已登录且能运行 App Server 的 Codex CLI/Desktop
+- 飞书企业自建应用，已启用机器人和长连接事件订阅
+
+## 本地安装
+
+```powershell
+Copy-Item config/default.example.yaml config/local.yaml
+Copy-Item config/projects.example.yaml config/projects.yaml
+npm ci
+npm run build
+```
+
+`config/projects.yaml` 可保留少量静态 bootstrap 项目。若希望飞书端直接复用 Codex Desktop 左栏中的本地项目，可启用自动同步；不要把真实密钥写入 YAML 或提交到 Git。
+
+如需在飞书中创建或导入项目，还要编辑 `config/local.yaml` 中的项目管理配置：
+
+```yaml
+projectManagement:
+  allowedRoots:
+    - D:/CodexWorkspace
+  allowCreateDirectory: true
+  allowRegisterExisting: true
+  codexDesktopProjects:
+    enabled: true
+```
+
+- `allowedRoots`：机器人可以创建或导入项目的父目录列表。`/project create` 使用列表中的第一个目录，`/project import` 会在所有目录中查找。
+- `allowCreateDirectory`：是否允许 `/project create` 新建目录；不需要此能力时保持 `false`。
+- `allowRegisterExisting`：是否允许 `/project import` 登记已有目录；不需要此能力时保持 `false`。
+- `codexDesktopProjects.enabled`：启用后，只读 Codex Desktop 的本地项目状态，把其当前可见项目按原顺序自动登记为可执行项目，不再逐项目要求 `/project import` 或修改 `allowedRoots`。本机配置已启用。
+- `codexDesktopProjects.stateFile`：可选覆盖 Desktop 状态文件路径；未配置时使用 `CODEX_HOME/.codex-global-state.json`，否则使用当前用户的 `~/.codex/.codex-global-state.json`。
+
+路径既可以写成 Windows 正斜杠形式（如 `D:/CodexWorkspace`），也可以使用 YAML 中正确转义的反斜杠。建议只配置专门存放代码的窄范围目录，不要配置磁盘根目录或用户主目录。
+
+### ClawBridge 管理器（推荐）
+
+构建完成后，直接双击仓库根目录的 `ClawBridge Manager.cmd`。管理器提供三个输入框：
+
+- `App ID`：飞书开放平台“凭证与基础信息”中的 `cli_...`
+- `App Secret`：同一页面中的应用密钥，输入框不会回显
+- `Open ID`：唯一允许控制机器人的飞书用户 `ou_...`
+
+第一次填写后点击“保存并应用”。三项凭据会使用 Windows 当前用户的 DPAPI 加密，保存到 `%LOCALAPPDATA%\ClawBridge\credentials.json`；不会写入仓库、YAML、命令行参数或 PowerShell 历史。以后直接在管理器中启动、停止、重启或“构建并重启”，无需再次输入，也无需使用 `npm start`。
+
+管理器只有在飞书长连接真正就绪后才显示“已连接”。若显示“连接异常”，查看窗口中的错误日志，并优先核对 App ID、App Secret、应用版本发布状态和长连接事件配置。
+
+“电脑登录自启动”使用当前 Windows 用户的计划任务。启用前会检查运行目录权限；如果仓库可被其他本机账户修改，管理器会拒绝创建自启动任务且不会自动修改 ACL。这样可以避免其他账户篡改登录脚本后借用你的 DPAPI 凭据。需要启用时，应先把项目放到仅当前用户、SYSTEM 和 Administrators 可写的目录，或在明确确认后单独收紧目录权限。
+
+命令行方式仍可用于排错：
+
+```powershell
+.\scripts\configure-credentials.ps1
+.\scripts\start.ps1
+.\scripts\status.ps1
+.\scripts\restart.ps1 -Build
+.\scripts\stop.ps1
+```
+
+## 飞书应用配置
+
+1. 创建企业自建应用并启用机器人。
+2. 为应用添加收发单聊消息和发送交互卡片所需权限。
+3. 在事件订阅中选择“使用长连接接收事件”，订阅 `im.message.receive_v1`。
+4. 在回调配置中同样选择长连接，并订阅卡片回传交互 `card.action.trigger`。
+5. 发布应用版本，并仅向测试用户开放。以后修改权限、事件或回调订阅，也必须重新发布版本才能生效。
+6. 把测试用户的 `open_id` 配置为唯一允许的控制者。
+
+启动前运行诊断：
+
+```powershell
+.\scripts\doctor.ps1
+.\scripts\start.ps1
+```
+
+修改代码后，需要重新构建并重启正在运行的 Bridge；仅重新发布飞书应用不会加载本机新代码：
+
+```powershell
+.\scripts\restart.ps1 -Build
+```
+
+### 手机交互卡片
+
+在机器人单聊中发送“菜单”或 `/menu`，即可打开 ClawBridge 控制台，不必在手机上输入项目名、对话名或编号。推荐流程如下：
+
+1. 点击“选择项目”，从列表选择任务要运行的本机项目。
+2. 点击“选择对话”，继续已有 Codex 对话；也可以点击“新对话”，然后直接发送第一条任务，无需手工填写对话名称。
+3. 之后发送的普通文本仍会作为 Codex 任务，进入卡片中显示的当前项目和当前对话。
+4. 任务执行期间可点击“停止任务”；任务结束后点击“交还桌面”，即可释放当前对话供 Codex Desktop 使用。
+5. 点击“刷新”重新查看当前项目、对话和任务状态。项目页和对话页也提供返回、刷新及查看对话内容的按钮。
+
+当前卡片 MVP 的项目列表和对话列表每页最多显示 10 条，可用“上一页/下一页”浏览。对话数据仍受 Codex 最近 50 条未归档记录的同步窗口约束；更早记录及其他高级操作可继续使用 `/project list`、`/chat list` 等文本命令。全部原有命令仍保留。
+
+交互卡片只会在机器人单聊中生成。卡片点击仍执行服务端校验：只有 `CLAWBRIDGE_FEISHU_ALLOWED_OPEN_ID` 绑定的用户、从本 Bridge 已成功发出的单聊卡片才能操作。卡片 payload 只接受预定义动作及受格式限制的内部项目/对话 ID，不会作为 shell、Codex 提示词或任意 Bridge 命令执行。
+
+当前仓库覆盖了卡片解析、渲染、动作路由、授权和持久 outbox 的自动测试，但尚未在真实飞书客户端上完成完整卡片端到端验证。首次启用后应依次现场检查“菜单”、项目选择、对话选择、新对话、停止任务、交还桌面和刷新。
+
+## 项目与对话管理
+
+ClawBridge 把“项目”和“对话”分开管理：项目对应一个本机工作目录，对话对应该目录下的一个 Codex 线程。启用 Desktop 自动同步后，`/projects` 会直接读取 Codex Desktop 当前可见的项目名称、顺序和主目录；每个项目仍独立记住最后选择的对话。普通文本会作为任务发送到当前项目、当前对话；若当前项目尚未选择对话，则会在收到第一条普通任务时创建对话。
+
+### 项目命令
+
+| 命令                                         | 作用与用法                                                                                                                                                                  |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/project list`                              | 刷新并按 Codex Desktop 顺序列出项目名称、真实目录和启用状态；`▶` 表示当前项目，`/projects` 与其等价。                                                                      |
+| `/project create <ID> [项目名称]`            | 在 `allowedRoots` 的第一个目录下新建 `<ID>` 目录并登记项目。例如 `/project create wafm "WaFM experiments"`。                                                                |
+| `/project import <ID> <相对路径> [项目名称]` | 登记 `allowedRoots` 下已经存在的目录。例如根目录为 `D:/CodexWorkspace` 时，`/project import claw claw "ClawBridge"` 会导入 `D:/CodexWorkspace/claw`。路径含空格时请加引号。 |
+| `/project use <名称\|#编号\|ID>`             | 按 Desktop 项目名称、列表编号或内部 ID 切换项目，并恢复该项目上次选择的对话。名称含空格时加引号，例如 `/project use "Codex Conversation Tree"`。                            |
+| `/project status`                            | 查看当前项目名称、稳定 `#编号`、真实目录、启用状态以及当前对话。                                                                                                            |
+| `/project disable <ID>`                      | 停用手工登记的项目。不会删除项目目录或对话历史；该项目有排队或运行任务时会拒绝操作。Desktop 项目请在 Desktop 中移除。                                                       |
+| `/project enable <ID>`                       | 重新启用手工停用的项目；Desktop 项目重新加入 Desktop 后会自动启用。                                                                                                         |
+
+手工创建/导入项目时，项目 ID 只能使用小写字母、数字、下划线和连字符，最长 64 个字符。Desktop 自动项目使用内部稳定 ID，日常无需复制它，直接使用名称或 `/project list` 的 `#编号` 即可。
+
+项目 `#编号` 由 Bridge 持久化分配，Desktop 调整展示顺序后编号不会改指向另一个目录。长期使用时仍建议按项目名称切换；项目名称重复时，Bridge 会要求改用 `/project list` 显示的稳定 `#编号`。
+
+### 对话命令
+
+执行对话命令前，先用 `/project use <名称|#编号|ID>` 选择项目。`/chat list` 为每个项目维护稳定的本地编号（例如 `#1`、`#2`），日常操作优先使用短编号，不必复制完整 Codex 线程 ID。
+
+| 命令                               | 作用与用法                                                                                    |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `/chat new [名称]`                 | 立即创建并选择一个新对话。示例：`/chat new "训练脚本排错"`。之后发送的普通消息会继续该对话。  |
+| `/chat list`                       | 刷新并列出当前项目未归档的对话。                                                              |
+| `/chat list archived`              | 仅列出已归档对话；`/chat list all` 同时列出未归档和已归档对话。也支持 `--archived`、`--all`。 |
+| `/chat use <编号或ID>`             | 选择一个未归档且空闲的对话。例如 `/chat use 2`、`/chat use #2` 或 `/chat use <完整线程ID>`。  |
+| `/chat show <编号或ID>`            | 查阅对话信息及最近 20 条用户/Codex 文本消息，不会切换当前对话。                               |
+| `/chat rename <编号或ID> <新名称>` | 重命名空闲对话，名称最长 120 个字符。例如 `/chat rename 2 "部署问题"`。                       |
+| `/chat archive <编号或ID>`         | 归档空闲对话；若它正是当前对话，会同时解除当前绑定，但不会删除历史。                          |
+| `/chat unarchive <编号或ID>`       | 恢复已归档对话，但不会自动切换；恢复后再执行 `/chat use <编号>`。                             |
+| `/chat close`                      | 关闭当前飞书对话并释放 Codex App Server，使同一对话可立即交给 Desktop；不删除或归档历史。     |
+
+除了本地编号和完整 ID，也可以使用已被本地索引、长度至少 8 位且唯一的线程 ID 前缀。若前缀不唯一，机器人会要求输入更长的 ID。对话严格归属于创建它的项目，不能在另一个项目中误选或继续。
+
+当前 MVP 的列表同步有固定窗口：每次执行 `/chat list`、`/chat list archived` 或 `/chat list all`，Bridge 都会分别从 Codex 同步当前项目最近 50 条未归档对话和最近 50 条已归档对话；飞书端每种列表模式最多显示 50 条，不会自动翻页扫描全部历史。已经进入 SQLite 索引但早于该窗口的对话仍可用本地编号、完整 ID 或已索引的唯一 ID 前缀操作。使用全新数据库时，早于两个同步窗口的旧对话尚无本地编号或前缀索引，需要输入完整 Codex 线程 ID；Bridge 会通过 `thread/read` 校验其项目 `cwd`，成功后补建本地索引并分配编号。
+
+本机 Codex CLI `0.147.0` 的真实 smoke 还表明：只执行 `thread/start`、尚未产生任何 turn 的纯空线程不一定出现在 App Server 的 `thread/list` 中。ClawBridge 用 `/chat new` 创建线程后会立即写入本地索引，因此该线程在飞书端仍可列出并跨重启恢复；但由其他客户端创建、从未产生 turn、且尚未被 Bridge 索引的空线程，可能需要完整线程 ID 才能首次导入。
+
+ClawBridge 与 Codex Desktop 共享底层 Codex 对话历史，但两端使用独立的 App Server 进程和客户端侧栏索引。ClawBridge 新建线程会按当前本机协议写入 `threadSource: "user"`，以贴近 Desktop 创建普通用户任务时的元数据；已经打开的 Desktop 仍不会收到另一个 App Server 进程发出的实时 `thread/started` 通知。Bridge 创建的任务通常可在 Desktop 完整退出并重启后按项目目录发现，但公开 App Server API 不提供 Desktop 私有项目归属写入或跨进程强制刷新能力，因此不能保证任务创建后立即、或固定显示在某个 Desktop 项目侧栏。不要直接修改 `.codex-global-state.json` 或 Codex SQLite 来绕过该限制。
+
+每个 Codex 回合结束后，Bridge 会调用 `thread/unsubscribe` 取消当前连接的线程订阅；这不会删除历史。官方 App Server 仍可能将没有订阅者的空闲线程保留为 loaded 最多约 30 分钟，因此如需立刻在 Codex Desktop 打开同一对话，请在任务结束后发送 `/chat close`。该命令会先确认全局没有排队或运行中的 Bridge 任务，再解除当前飞书绑定并关闭按需启动的 Codex App Server；下一个飞书任务会自动重新启动它。之后可用 `/chat use <编号或ID>` 重新选择原对话。若仍有任务进行中，`/chat close` 会拒绝执行，避免误中断其他项目或聊天。
+
+### 兼容命令的语义
+
+旧命令继续可用，但 `/use`、`/new` 与新命令有意保留不同语义：
+
+- `/projects` 等同于 `/project list`。
+- `/status` 等同于 `/project status`。
+- `/threads` 等同于 `/chat list`。
+- `/resume <编号或ID>` 等同于 `/chat use <编号或ID>`。
+- `/use <项目名称|#编号|ID>` 会切换项目并清除该项目当前对话绑定，因此下一条普通任务一定创建新对话。这是为了兼容旧版行为。
+- `/new` 只解除当前对话绑定，不会立即启动 Codex；下一条普通任务到来时才懒创建新对话。
+- `/project use <项目名称|#编号|ID>` 不清除绑定，而是恢复该项目上次使用的对话。日常在多个项目间切换时应优先使用它。
+- `/stop` 请求中断当前运行中的 Codex 回合；`/chat close` 在任务结束后释放空闲 App Server，便于把对话交给 Desktop；`/health` 查看 Bridge 健康状态；`/help` 查看手机端命令摘要。
+
+### 手机端典型流程
+
+首次使用已有项目：
+
+```text
+/project list
+/project use claw
+/chat new "README 审计"
+请读取 README.md，概括当前项目，不要修改文件。
+```
+
+切换到另一个项目并返回原对话：
+
+```text
+/project use wafm
+/chat list
+/chat use 3
+继续检查上一轮训练日志。
+
+/project use bridge-dev
+/project status
+继续刚才的 README 审计，并给出三条改进建议。
+```
+
+`/project use bridge-dev` 会自动恢复 `bridge-dev` 上次选择的对话；如果想在该项目中另开工作，使用 `/chat new "新任务名称"`。如果只想查阅旧记录而不改变后续消息的去向，使用 `/chat show <编号>`。
+
+从手机新建项目：
+
+```text
+/project create demo-agent "Demo Agent"
+/project use demo-agent
+/chat new "初始化"
+请创建一个最小 TypeScript 项目，并先说明准备修改哪些文件。
+```
+
+导入已有目录：
+
+```text
+/project import openpi openpi-main "OpenPI"
+/project use openpi
+/chat new "环境检查"
+请只检查依赖和 Git 状态，不要修改文件。
+```
+
+### 持久化与配置边界
+
+- `config/projects.yaml` 是静态项目的 bootstrap 清单。启用 `codexDesktopProjects` 后，Bridge 启动及每次列出/切换项目时还会只读刷新 Codex Desktop 项目；同一真实目录会复用现有静态 ID，不会重复登记。
+- Desktop 自动项目按其内部 source ID 持久化到 SQLite；改名和目录变化会同步更新，从 Desktop 可见列表移除后会在 Bridge 中自动停用而不删除历史。目录变化时会解除旧对话绑定；若仍有排队或运行中的任务则拒绝变更，避免任务跑到另一目录。
+- Codex App Server 没有 Desktop `project/list` 接口，因此发现器读取的是 Desktop 私有状态格式，而不是官方稳定 API。Bridge 只提取 `project-order`、项目名称和 `rootPaths`，不会记录其他状态；升级 Desktop 后应重新运行发现器测试和本机只读 smoke。
+- Desktop 主状态文件无法严格解析时采用 fail-closed：`.bak` 仅用于诊断，不会作为执行授权源；此前自动项目会暂时停用，直到主状态文件恢复。这样已移除的旧项目不会因备份或 SQLite 缓存继续获得远程执行权限。
+- 通过 `/project create` 或 `/project import` 添加的动态项目、每个飞书会话的当前项目、每个项目最后选择的对话、对话编号和归档状态都保存在 `bridge.databasePath` 指向的 SQLite 数据库中，重启后仍会恢复。
+- 动态项目不需要回写 `config/projects.yaml`。删除或更换 SQLite 数据库会丢失这些动态登记及本地索引；YAML 中的项目会在新数据库首次启动时重新 bootstrap。
+- `allowedRoots` 只授权机器人在指定父目录下创建或导入项目，不会扩大 Codex 自身的 sandbox 权限。
+
+### 安全限制
+
+- `/project import` 只接受相对于 `allowedRoots` 的路径，拒绝绝对路径、`..` 路径逃逸以及解析后越界的符号链接。若多个允许根目录中存在同名相对路径，也会拒绝导入，避免选错目录。
+- `/project create` 只在第一个允许根目录下创建一个新的直接子目录；目标已存在时不会接管，需显式使用 `/project import`。
+- 启用 `codexDesktopProjects` 表示明确授权飞书操作者使用 Codex Desktop 当前可见的所有本地项目；这些项目不再经过 `allowedRoots` 二次授权。状态文件只读，Bridge 不会修改 Desktop 项目配置。
+- Desktop 支持多目录项目；当前 Bridge 以 `rootPaths` 的第一个目录作为主 `cwd`，并在项目列表中给出多目录提示。当前本机 17 个可见项目均为单目录项目。
+- ClawBridge 没有远程删除项目目录或永久删除对话的命令。`disable` 只停用登记，`archive` 只归档对话，两者都保留数据。
+- 同一飞书会话有任务排队或运行时，项目切换、创建/切换对话等会被拒绝；可等待任务结束或用 `/stop` 中断运行回合。正在运行或被租约占用的对话也不能切换、重命名或归档。
+- 普通消息一次只进入当前项目绑定的一个对话。发送任务前可用 `/project status` 再次确认工作目录和对话，避免在手机端选错上下文。
+
+## 离线契约验证
+
+不连接飞书和真实 Codex 也可以验证核心协议：
+
+```powershell
+npm run check
+npm test
+```
+
+测试使用真实 SQLite 和一个假 App Server 子进程，覆盖授权、群聊拒绝、路径逃逸、脱敏、飞书 payload、事件去重、线程租约、outbox 重试、迁移、重启恢复以及 JSONL 握手/线程/任务事件。
+
+## Codex 版本与线协议
+
+当前 App Server wire 契约不是只根据官网示例推断：实现基线来自本机 Codex CLI `0.147.0` 执行 `codex app-server generate-json-schema` 生成的 schema，并已用同一二进制完成真实验证。2026-08-11 的 smoke 覆盖 `initialize`、最小只读 `turn/start` 到 `turn/completed`，以及新建对话、命名、读取历史、未归档列表、归档列表、恢复和最终再次归档；各项均通过。该结论只适用于本机已验证版本和这些 App Server 链路，不代表跨版本兼容，也不代表飞书中正在运行的旧进程已经自动加载本次代码。
+
+[OpenAI 官方 App Server 文档](https://developers.openai.com/codex/app-server)用于确认方法语义和推荐流程，但官网当前文档与本机已安装版本可能在 approval、sandbox 等枚举拼写上不同，例如驼峰形式与带连字符形式。ClawBridge 的 YAML 配置使用仓库 schema 中的值，客户端再映射为本机生成 schema 和真实 turn 已确认的 wire 值；不要直接把网页示例中的枚举复制到 JSONL 请求中。
+
+升级 Codex CLI/Desktop 后，应把协议复核视为必做迁移步骤：
+
+1. 记录新的 `codex --version`，重新运行 `codex app-server generate-json-schema`。
+2. 对比方法参数、响应结构和枚举，重点检查 `approvalPolicy`、`sandbox` 与 `sandboxPolicy`。
+3. 如有差异，先更新协议类型、客户端映射、假 App Server 和 contract tests。
+4. 重新运行类型检查、构建和 contract tests，再使用无敏感数据的测试目录完成真实只读 turn smoke 与项目/对话管理 smoke。
+
+只有上述检查在新版本上通过后，才能把该 Codex 版本作为新的已验证基线。
+
+## 安全状态
+
+- App Server 仅通过子进程标准输入输出连接，不监听 TCP。
+- 首版只接受一个 `open_id` 的单聊消息。
+- Codex 仅允许 `readOnly` 或 `workspaceWrite`，配置 schema 不接受 `dangerFullAccess`。
+- 项目可以来自 Codex Desktop 当前可见本地项目、`config/projects.yaml` 静态登记，或受 `projectManagement.allowedRoots` 约束的手工创建/导入流程。Desktop 自动同步模式由本机配置显式开启。
+- 日志和外发消息会遮盖常见 Token、Authorization 头和密钥字段。
+- 当前版本还没有手机审批 broker，因此默认使用 `approvalPolicy: never`；若手动改为按需审批，Bridge 会拒绝命令/文件审批及其他不支持的交互请求，避免无人值守误批准或无限等待。
+- App Server RPC 默认 30 秒超时，完整 Codex 回合默认 10 分钟超时；回合超时后 Bridge 会主动发送 `turn/interrupt`，避免遗留后台任务。
+
+完整路线与 Gate 定义见 [BRIDGE_PLAN.md](BRIDGE_PLAN.md)，当前进度见 [docs/PHASE2_STATUS.md](docs/PHASE2_STATUS.md)，安全边界见 [docs/SECURITY.md](docs/SECURITY.md)。

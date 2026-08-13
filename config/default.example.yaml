@@ -1,0 +1,34 @@
+bridge:
+  databasePath: ./data/clawbridge.db
+  logLevel: info
+  maxConcurrency: 1
+  deliveryMaxAttempts: 5
+  deliveryRetryBaseMs: 1000
+
+feishu:
+  appIdEnv: CLAWBRIDGE_FEISHU_APP_ID
+  appSecretEnv: CLAWBRIDGE_FEISHU_APP_SECRET
+  allowedOpenIdEnv: CLAWBRIDGE_FEISHU_ALLOWED_OPEN_ID
+  directMessagesOnly: true
+
+codex:
+  command: codex
+  args: [app-server]
+  # Mobile approval cards are not implemented yet, so keep this non-interactive.
+  approvalPolicy: never
+  sandbox: workspaceWrite
+  requestTimeoutMs: 30000
+  turnTimeoutMs: 600000
+
+projectManagement:
+  # Runtime-created/imported projects must remain under one of these roots.
+  allowedRoots:
+    - D:/CodexWorkspace
+  allowCreateDirectory: true
+  allowRegisterExisting: true
+  # When enabled, every visible local project in Codex Desktop is automatically trusted and
+  # synchronized. The Desktop state file is only read; ClawBridge never writes it.
+  codexDesktopProjects:
+    enabled: false
+
+projectsFile: ./config/projects.yaml

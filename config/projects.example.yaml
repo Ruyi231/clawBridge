@@ -1,0 +1,5 @@
+projects:
+  - id: bridge-dev
+    name: ClawBridge development
+    rootPath: D:/CodexWorkspace/claw
+    enabled: true

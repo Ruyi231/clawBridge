@@ -1,0 +1,1683 @@
+import pino from "pino";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type { ChannelAdapter } from "../../src/channels/channel-adapter.js";
+import type { InboundEvent, OutboundMessage } from "../../src/core/types.js";
+import type { CodexRunner } from "../../src/codex/protocol-types.js";
+import type { BridgeConfig } from "../../src/config/schema.js";
+import { BridgeDatabase } from "../../src/persistence/database.js";
+import { Bridge } from "../../src/core/bridge.js";
+import { BridgeError } from "../../src/core/errors.js";
+import type { DesktopProjectSource } from "../../src/projects/codex-desktop-project-discovery.js";
+
+class FakeChannel implements ChannelAdapter {
+  callback?: (event: InboundEvent) => Promise<void>;
+  readonly sent: OutboundMessage[] = [];
+  sendAttempts = 0;
+  private remainingFailures: number;
+  private releaseBlockedSend?: () => void;
+
+  constructor(options: { failures?: number; blockFirstSend?: boolean } = {}) {
+    this.remainingFailures = options.failures ?? 0;
+    if (options.blockFirstSend) {
+      this.firstSendGate = new Promise<void>((resolve) => {
+        this.releaseBlockedSend = resolve;
+      });
+    }
+  }
+
+  private readonly firstSendGate?: Promise<void>;
+
+  async start(callback: (event: InboundEvent) => Promise<void>): Promise<void> {
+    this.callback = callback;
+  }
+
+  async stop(): Promise<void> {}
+
+  async send(message: OutboundMessage): Promise<string> {
+    this.sendAttempts += 1;
+    if (this.sendAttempts === 1 && this.firstSendGate) await this.firstSendGate;
+    if (this.remainingFailures > 0) {
+      this.remainingFailures -= 1;
+      throw new Error("temporary Feishu failure");
+    }
+    this.sent.push(message);
+    const id = `sent-${this.sent.length}`;
+    return id;
+  }
+
+  releaseFirstSend(): void {
+    this.releaseBlockedSend?.();
+  }
+
+  async receive(text: string, eventId = "event-bridge-1"): Promise<void> {
+    if (!this.callback) throw new Error("channel has not started");
+    await this.callback({
+      eventId,
+      messageId: "message-bridge-1",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      senderOpenId: "owner",
+      text,
+      receivedAt: new Date().toISOString(),
+    });
+  }
+
+  async receiveGroup(text: string, eventId = "group-event-bridge-1"): Promise<void> {
+    if (!this.callback) throw new Error("channel has not started");
+    await this.callback({
+      eventId,
+      messageId: "group-message-bridge-1",
+      chatId: "chat-group",
+      chatType: "group",
+      senderOpenId: "owner",
+      text,
+      receivedAt: new Date().toISOString(),
+    });
+  }
+
+  async receiveCard(
+    value: Record<string, unknown>,
+    eventId = "card-event-bridge-1",
+    senderOpenId = "owner",
+    messageId = this.latestCardMessageId(),
+  ): Promise<void> {
+    if (!this.callback) throw new Error("channel has not started");
+    await this.callback({
+      kind: "card_action",
+      eventId,
+      messageId,
+      chatId: "chat-owner",
+      chatType: "unknown",
+      senderOpenId,
+      value,
+      receivedAt: new Date().toISOString(),
+    });
+  }
+
+  private latestCardMessageId(): string {
+    for (let index = this.sent.length - 1; index >= 0; index -= 1) {
+      if (this.sent[index]?.kind === "card") return `sent-${index + 1}`;
+    }
+    return "missing-card-message";
+  }
+}
+
+const config: BridgeConfig = {
+  bridge: {
+    databasePath: ":memory:",
+    logLevel: "info",
+    maxConcurrency: 1,
+    deliveryMaxAttempts: 5,
+    deliveryRetryBaseMs: 10,
+  },
+  feishu: {
+    appIdEnv: "APP_ID",
+    appSecretEnv: "APP_SECRET",
+    allowedOpenIdEnv: "OWNER_ID",
+    directMessagesOnly: true,
+  },
+  codex: {
+    command: "fake",
+    args: [],
+    approvalPolicy: "onRequest",
+    sandbox: "workspaceWrite",
+    requestTimeoutMs: 2_000,
+    turnTimeoutMs: 10_000,
+  },
+  projectManagement: {
+    allowedRoots: [],
+    allowCreateDirectory: false,
+    allowRegisterExisting: false,
+    codexDesktopProjects: { enabled: false },
+  },
+  projectsFile: "projects.yaml",
+};
+
+let bridge: Bridge | undefined;
+afterEach(async () => bridge?.stop());
+
+function fakeCodex(): CodexRunner {
+  let createdThread = 0;
+  return {
+    runTurn: vi.fn(async (input: Parameters<CodexRunner["runTurn"]>[0]) => {
+      input.onStarted?.({ threadId: "thread-bridge", turnId: "turn-bridge" });
+      return {
+        threadId: "thread-bridge",
+        turnId: "turn-bridge",
+        finalText: "done",
+      };
+    }),
+    startThread: vi.fn(async (input: Parameters<CodexRunner["startThread"]>[0]) => ({
+      id: `thread-created-${++createdThread}`,
+      name: null,
+      preview: "",
+      cwd: input.cwd,
+      updatedAt: Date.now(),
+      status: "notLoaded",
+    })),
+    listThreads: vi.fn(async () => []),
+    readThread: vi.fn(async (threadId: string) => ({
+      id: threadId,
+      name: "Test thread",
+      preview: "",
+      cwd: process.cwd(),
+      updatedAt: null,
+      status: "notLoaded",
+    })),
+    readThreadDetails: vi.fn(async (threadId: string) => ({
+      id: threadId,
+      name: "Test thread",
+      preview: "",
+      cwd: process.cwd(),
+      updatedAt: Date.now(),
+      status: "notLoaded",
+      turns: [],
+    })),
+    nameThread: vi.fn(async () => undefined),
+    archiveThread: vi.fn(async () => undefined),
+    unarchiveThread: vi.fn(async (threadId: string) => ({
+      id: threadId,
+      name: "Test thread",
+      preview: "",
+      cwd: process.cwd(),
+      updatedAt: Date.now(),
+      status: "notLoaded",
+    })),
+    unsubscribeThread: vi.fn(async () => "unsubscribed" as const),
+    interrupt: vi.fn(async () => undefined),
+    stop: vi.fn(async () => undefined),
+  };
+}
+
+describe("Bridge vertical slice", () => {
+  it("prints a local pairing candidate without authorizing it", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const logger = pino({ level: "silent" });
+    const warn = vi.spyOn(logger, "warn");
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "ou_pending_pairing",
+      logger,
+    });
+
+    await bridge.start();
+    await channel.receive("pair me", "pair-event");
+
+    expect(warn).toHaveBeenCalledWith(
+      { pairingCandidateOpenId: "owner" },
+      expect.stringContaining("CLAWBRIDGE_FEISHU_ALLOWED_OPEN_ID"),
+    );
+    expect(codex.runTurn).not.toHaveBeenCalled();
+    expect(channel.sent).toHaveLength(0);
+  });
+
+  it("persists an inbound message, runs Codex, and sends the final result", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    bridge = new Bridge({
+      channel,
+      codex,
+      database: new BridgeDatabase(":memory:"),
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receive("inspect this project");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("✅ completed"))).toBe(true),
+    );
+    expect(codex.runTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: "inspect this project", cwd: process.cwd() }),
+    );
+    expect(codex.unsubscribeThread).toHaveBeenCalledWith("thread-bridge");
+    expect(channel.sent.at(-1)?.text).toContain("thread-bridge");
+  });
+
+  it("returns the interactive control card for /menu", async () => {
+    const channel = new FakeChannel();
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database: new BridgeDatabase(":memory:"),
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receive("/menu", "menu-command");
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) => message.kind === "card" && message.text === "ClawBridge 控制台",
+        ),
+      ).toBe(true),
+    );
+
+    const menu = channel.sent.find(
+      (message) => message.kind === "card" && message.text === "ClawBridge 控制台",
+    );
+    expect(menu).toMatchObject({
+      kind: "card",
+      audience: "p2p",
+      card: {
+        config: { update_multi: false },
+        header: { title: { content: "ClawBridge 控制台" } },
+      },
+    });
+  });
+
+  it("does not issue an interactive card into a group chat", async () => {
+    const channel = new FakeChannel();
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database: new BridgeDatabase(":memory:"),
+      config: {
+        ...config,
+        feishu: { ...config.feishu, directMessagesOnly: false },
+      },
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receiveGroup("菜单", "group-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("仅支持机器人单聊"))).toBe(true),
+    );
+    expect(channel.sent.some((message) => message.kind === "card")).toBe(false);
+  });
+
+  it("paginates all available projects through card actions", async () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-card-pages-"));
+    try {
+      const channel = new FakeChannel();
+      const database = new BridgeDatabase(":memory:");
+      const projects = Array.from({ length: 17 }, (_, index) => {
+        const rootPath = path.join(temporaryDirectory, `project-${index + 1}`);
+        mkdirSync(rootPath);
+        return { id: `p${index + 1}`, name: `Project ${index + 1}`, rootPath, enabled: true };
+      });
+      bridge = new Bridge({
+        channel,
+        codex: fakeCodex(),
+        database,
+        config,
+        projects,
+        allowedOpenId: "owner",
+        logger: pino({ level: "silent" }),
+      });
+      await bridge.start();
+      await channel.receive("/menu", "project-page-menu");
+      await vi.waitFor(() =>
+        expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+      );
+
+      await channel.receiveCard(
+        { version: 1, action: "project.list", page: 1 },
+        "project-page-two",
+      );
+      await vi.waitFor(() =>
+        expect(
+          channel.sent.some(
+            (message) =>
+              message.kind === "card" &&
+              JSON.stringify(message.card).includes("Project 9") &&
+              JSON.stringify(message.card).includes("第 2 / 2 页"),
+          ),
+        ).toBe(true),
+      );
+    } finally {
+      await bridge?.stop();
+      bridge = undefined;
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("selects a project and prepares a fresh thread through card actions", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("/menu", "card-project-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+    await channel.receiveCard({ version: 1, action: "project.list" }, "card-project-list");
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some((message) => message.kind === "card" && message.text === "选择项目"),
+      ).toBe(true),
+    );
+
+    await channel.receiveCard(
+      { version: 1, action: "project.use", projectId: "demo" },
+      "card-project-use",
+    );
+    await vi.waitFor(() => expect(database.getConversation("chat-owner")?.projectId).toBe("demo"));
+    database.upsertThread({
+      threadId: "thread-old",
+      projectId: "demo",
+      title: "Old work",
+      archived: false,
+    });
+    database.setThread("chat-owner", "demo", "thread-old");
+
+    await channel.receiveCard(
+      { version: 1, action: "thread.new", projectId: "demo" },
+      "card-thread-new",
+    );
+    await vi.waitFor(() => expect(database.getConversation("chat-owner")?.threadId).toBeNull());
+
+    await channel.receive("从新对话开始执行", "card-fresh-thread-task");
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(codex.runTurn).mock.calls[0]?.[0]).toMatchObject({
+      prompt: "从新对话开始执行",
+      threadId: null,
+    });
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-owner")?.threadId).toBe("thread-bridge"),
+    );
+  });
+
+  it("lists and selects an existing thread through card actions", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    vi.mocked(codex.listThreads).mockImplementation(async (input) =>
+      input.archived
+        ? []
+        : [
+            {
+              id: "thread-existing",
+              name: "Existing work",
+              preview: "Continue here",
+              cwd: process.cwd(),
+              updatedAt: Date.now(),
+              status: "notLoaded",
+            },
+          ],
+    );
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("/menu", "card-thread-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+
+    await channel.receiveCard(
+      { version: 1, action: "thread.list", projectId: "demo" },
+      "card-thread-list",
+    );
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) => message.kind === "card" && message.text === "选择 Demo 的对话",
+        ),
+      ).toBe(true),
+    );
+    expect(database.getProjectThread("demo", "thread-existing")).toMatchObject({
+      title: "Existing work",
+      archived: false,
+    });
+
+    await channel.receiveCard(
+      {
+        version: 1,
+        action: "thread.use",
+        projectId: "demo",
+        threadId: "thread-existing",
+      },
+      "card-thread-use",
+    );
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-owner")?.threadId).toBe("thread-existing"),
+    );
+    expect(codex.readThread).toHaveBeenCalledWith("thread-existing");
+  });
+
+  it("deduplicates repeated card callback events", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    bridge = new Bridge({
+      channel,
+      codex,
+      database: new BridgeDatabase(":memory:"),
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("/menu", "card-dedupe-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+    channel.sent.length = 0;
+
+    const value = { version: 1, action: "project.list" };
+    await channel.receiveCard(value, "same-card-event", "owner", "sent-1");
+    await channel.receiveCard(value, "same-card-event", "owner", "sent-1");
+    await vi.waitFor(() =>
+      expect(channel.sent.filter((message) => message.kind === "card")).toHaveLength(1),
+    );
+    expect(codex.runTurn).not.toHaveBeenCalled();
+  });
+
+  it("does not execute a card action from an unauthorized sender", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("/menu", "unauthorized-card-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+    const sentBeforeUnauthorizedClick = channel.sent.length;
+
+    await channel.receiveCard(
+      { version: 1, action: "project.use", projectId: "demo" },
+      "unauthorized-card",
+      "intruder",
+    );
+
+    expect(database.getConversation("chat-owner")).toBeUndefined();
+    expect(channel.sent).toHaveLength(sentBeforeUnauthorizedClick);
+    expect(codex.runTurn).not.toHaveBeenCalled();
+    expect(codex.startThread).not.toHaveBeenCalled();
+  });
+
+  it("does not execute a card action from an unknown card message", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receiveCard(
+      { version: 1, action: "project.use", projectId: "demo" },
+      "unknown-card-event",
+      "owner",
+      "not-sent-by-bridge",
+    );
+
+    expect(database.getConversation("chat-owner")).toBeUndefined();
+    expect(channel.sent).toHaveLength(0);
+    expect(codex.runTurn).not.toHaveBeenCalled();
+    expect(codex.startThread).not.toHaveBeenCalled();
+  });
+
+  it("closes a selected thread from a card without deleting its history", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    database.selectProject("chat-owner", "demo");
+    database.upsertThread({
+      threadId: "thread-card-close",
+      projectId: "demo",
+      title: "Keep card history",
+      archived: false,
+    });
+    database.setThread("chat-owner", "demo", "thread-card-close");
+
+    await channel.receive("/menu", "card-close-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+
+    await channel.receiveCard({ version: 1, action: "chat.close" }, "card-chat-close");
+    await vi.waitFor(() => expect(codex.stop).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("已关闭并释放"))).toBe(true),
+    );
+
+    expect(codex.unsubscribeThread).toHaveBeenCalledWith("thread-card-close");
+    expect(database.getConversation("chat-owner")).toEqual({
+      projectId: "demo",
+      threadId: null,
+    });
+    expect(database.getProjectThread("demo", "thread-card-close")).toMatchObject({
+      title: "Keep card history",
+      archived: false,
+    });
+  });
+
+  it("unsubscribes a newly created chat while preserving its binding and history", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/project use demo", "new-release-project");
+    await channel.receive('/chat new "Desktop handoff"', "new-release-chat");
+
+    await vi.waitFor(() =>
+      expect(codex.unsubscribeThread).toHaveBeenCalledWith("thread-created-1"),
+    );
+    expect(codex.stop).not.toHaveBeenCalled();
+    expect(database.getConversation("chat-owner")).toEqual({
+      projectId: "demo",
+      threadId: "thread-created-1",
+    });
+    expect(database.getProjectThread("demo", "thread-created-1")).toMatchObject({
+      archived: false,
+      title: "Desktop handoff",
+    });
+  });
+
+  it("unsubscribes a newly created chat even when naming it fails", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    vi.mocked(codex.nameThread).mockRejectedValue(new Error("name unavailable"));
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/project use demo", "new-name-failure-project");
+    await channel.receive('/chat new "Naming failure"', "new-name-failure-chat");
+
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("命名失败"))).toBe(true),
+    );
+    await vi.waitFor(() =>
+      expect(codex.unsubscribeThread).toHaveBeenCalledWith("thread-created-1"),
+    );
+    expect(codex.stop).not.toHaveBeenCalled();
+    expect(database.getConversation("chat-owner")).toEqual({
+      projectId: "demo",
+      threadId: "thread-created-1",
+    });
+    expect(database.getProjectThread("demo", "thread-created-1")).toMatchObject({
+      archived: false,
+    });
+  });
+
+  it("stops the idle App Server when task unsubscribe fails and can run the next task", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    vi.mocked(codex.unsubscribeThread).mockRejectedValue(new Error("unsubscribe unavailable"));
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("first task", "unsubscribe-fallback-first");
+    await vi.waitFor(() => expect(codex.stop).toHaveBeenCalledTimes(1));
+    expect(database.getConversation("chat-owner")).toEqual({
+      projectId: "demo",
+      threadId: "thread-bridge",
+    });
+    expect(database.getProjectThread("demo", "thread-bridge")).toMatchObject({ archived: false });
+
+    await channel.receive("second task", "unsubscribe-fallback-second");
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(codex.stop).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(codex.runTurn).mock.calls[1]?.[0].threadId).toBe("thread-bridge");
+    expect(database.getConversation("chat-owner")?.threadId).toBe("thread-bridge");
+    expect(channel.sent.filter((message) => message.text.includes("✅ completed"))).toHaveLength(2);
+  });
+
+  it("closes the selected Feishu chat without deleting its history", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/project use demo", "close-project");
+    await channel.receive('/chat new "Desktop handoff"', "close-new");
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-owner")?.threadId).toBe("thread-created-1"),
+    );
+
+    await channel.receive("/chat close", "close-chat");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("已关闭并释放"))).toBe(true),
+    );
+
+    expect(codex.unsubscribeThread).toHaveBeenCalledWith("thread-created-1");
+    expect(codex.stop).toHaveBeenCalledTimes(1);
+    expect(database.getConversation("chat-owner")).toEqual({
+      projectId: "demo",
+      threadId: null,
+    });
+    expect(database.getProjectThread("demo", "thread-created-1")).toMatchObject({
+      archived: false,
+      title: "Desktop handoff",
+    });
+  });
+
+  it("keeps the selected chat bound when stopping Codex during /chat close fails", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    vi.mocked(codex.stop).mockRejectedValueOnce(new Error("stop unavailable"));
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    database.selectProject("chat-owner", "demo");
+    database.upsertThread({
+      threadId: "thread-close-failure",
+      projectId: "demo",
+      title: "Keep this chat",
+      archived: false,
+    });
+    database.setThread("chat-owner", "demo", "thread-close-failure");
+
+    await channel.receive("/chat close", "close-stop-failure");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("stop unavailable"))).toBe(true),
+    );
+
+    expect(codex.unsubscribeThread).toHaveBeenCalledWith("thread-close-failure");
+    expect(codex.stop).toHaveBeenCalledTimes(1);
+    expect(database.getConversation("chat-owner")).toEqual({
+      projectId: "demo",
+      threadId: "thread-close-failure",
+    });
+    expect(database.getProjectThread("demo", "thread-close-failure")).toMatchObject({
+      archived: false,
+      title: "Keep this chat",
+    });
+  });
+
+  it("rejects /chat close while any task is still open", async () => {
+    const channel = new FakeChannel();
+    let releaseTurn: (() => void) | undefined;
+    const codex = fakeCodex();
+    codex.runTurn = vi.fn(
+      (input: Parameters<CodexRunner["runTurn"]>[0]) =>
+        new Promise<Awaited<ReturnType<CodexRunner["runTurn"]>>>((resolve) => {
+          input.onStarted?.({ threadId: "thread-active", turnId: "turn-active" });
+          releaseTurn = () =>
+            resolve({ threadId: "thread-active", turnId: "turn-active", finalText: "done" });
+        }),
+    );
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("long task", "close-open-task");
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
+
+    await channel.receive("/chat close", "close-while-running");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("仍有任务正在排队或运行"))).toBe(
+        true,
+      ),
+    );
+    expect(codex.stop).not.toHaveBeenCalled();
+
+    releaseTurn?.();
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("✅ completed"))).toBe(true),
+    );
+  });
+
+  it("returns from inbound handling while the outbound API is still blocked", async () => {
+    const channel = new FakeChannel({ blockFirstSend: true });
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database: new BridgeDatabase(":memory:"),
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await expect(
+      Promise.race([
+        channel.receive("inspect this project"),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("inbound handler blocked")), 100),
+        ),
+      ]),
+    ).resolves.toBeUndefined();
+    channel.releaseFirstSend();
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("✅ completed"))).toBe(true),
+    );
+  });
+
+  it("retries a transient delivery failure without rerunning the Codex task", async () => {
+    const channel = new FakeChannel({ failures: 1 });
+    const codex = fakeCodex();
+    bridge = new Bridge({
+      channel,
+      codex,
+      database: new BridgeDatabase(":memory:"),
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("inspect this project");
+
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("✅ completed"))).toBe(true),
+    );
+    expect(channel.sendAttempts).toBeGreaterThanOrEqual(3);
+    expect(codex.runTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a repeated event before routing it a second time", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    bridge = new Bridge({
+      channel,
+      codex,
+      database: new BridgeDatabase(":memory:"),
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("inspect this project", "same-event");
+    await channel.receive("inspect this project", "same-event");
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
+  });
+
+  it("drains a queued task after reopening the same database", async () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-test-"));
+    const databasePath = path.join(temporaryDirectory, "bridge.db");
+    try {
+      const firstDatabase = new BridgeDatabase(databasePath);
+      firstDatabase.syncProjects([
+        { id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true },
+      ]);
+      firstDatabase.enqueue(
+        {
+          eventId: "queued-before-restart",
+          messageId: "message-before-restart",
+          chatId: "chat-owner",
+          chatType: "p2p",
+          senderOpenId: "owner",
+          text: "resume queued work",
+          receivedAt: new Date().toISOString(),
+        },
+        "demo",
+      );
+      firstDatabase.close();
+
+      const channel = new FakeChannel();
+      const codex = fakeCodex();
+      bridge = new Bridge({
+        channel,
+        codex,
+        database: new BridgeDatabase(databasePath),
+        config: { ...config, bridge: { ...config.bridge, databasePath } },
+        projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+        allowedOpenId: "owner",
+        logger: pino({ level: "silent" }),
+      });
+      await bridge.start();
+      await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
+      await bridge.stop();
+      bridge = undefined;
+    } finally {
+      if (bridge) {
+        await bridge.stop();
+        bridge = undefined;
+      }
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("lists project threads and binds an idle thread", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    vi.mocked(codex.listThreads).mockImplementation(async (input) =>
+      input.archived
+        ? []
+        : [
+            {
+              id: "thread-existing",
+              name: "Existing work",
+              preview: "",
+              cwd: process.cwd(),
+              updatedAt: 1,
+              status: "notLoaded",
+            },
+          ],
+    );
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/use demo", "use-event");
+    await channel.receive("/threads", "threads-event");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("thread-existing"))).toBe(true),
+    );
+
+    await channel.receive("/resume thread-existing", "resume-event");
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-owner")?.threadId).toBe("thread-existing"),
+    );
+    expect(codex.readThread).toHaveBeenCalledWith("thread-existing");
+  });
+
+  it("interrupts an active turn and records a cancelled task", async () => {
+    const channel = new FakeChannel();
+    let rejectTurn: ((error: Error) => void) | undefined;
+    const codex = fakeCodex();
+    codex.runTurn = vi.fn(
+      (input: Parameters<CodexRunner["runTurn"]>[0]) =>
+        new Promise<never>((_, reject) => {
+          rejectTurn = reject;
+          input.onStarted?.({ threadId: "thread-active", turnId: "turn-active" });
+        }),
+    );
+    codex.interrupt = vi.fn(async () => {
+      rejectTurn?.(new BridgeError("CODEX_INTERRUPTED", "interrupted"));
+    });
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("long task", "long-task-event");
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
+    await channel.receive("/stop", "stop-event");
+
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("cancelled"))).toBe(true),
+    );
+    expect(codex.interrupt).toHaveBeenCalledWith("thread-active", "turn-active");
+    expect(database.nextQueued()).toBeUndefined();
+  });
+
+  it("continues the bound thread and creates a fresh one after /new", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    bridge = new Bridge({
+      channel,
+      codex,
+      database: new BridgeDatabase(":memory:"),
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("first task", "first-event");
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
+    await channel.receive("second task", "second-event");
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(codex.runTurn).mock.calls[1]?.[0].threadId).toBe("thread-bridge");
+    await vi.waitFor(() =>
+      expect(channel.sent.filter((message) => message.text.includes("✅ completed")).length).toBe(
+        2,
+      ),
+    );
+
+    await channel.receive("/new", "new-event");
+    await channel.receive("third task", "third-event");
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(codex.runTurn).mock.calls[2]?.[0].threadId).toBeNull();
+  });
+
+  it("restores the last selected thread independently for each project", async () => {
+    const channel = new FakeChannel();
+    const database = new BridgeDatabase(":memory:");
+    const codex = fakeCodex();
+    const otherRoot = path.dirname(process.cwd());
+    vi.mocked(codex.readThread).mockImplementation(async (threadId: string) => ({
+      id: threadId,
+      name: "Test thread",
+      preview: "",
+      cwd: threadId === "thread-other" ? otherRoot : process.cwd(),
+      updatedAt: null,
+      status: "notLoaded",
+    }));
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [
+        { id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true },
+        { id: "other", name: "Other", rootPath: otherRoot, enabled: true },
+      ],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    database.selectProject("chat-owner", "demo");
+    database.setThread("chat-owner", "demo", "thread-demo");
+    database.selectProject("chat-owner", "other");
+    database.setThread("chat-owner", "other", "thread-other");
+
+    await channel.receive("/project use demo", "restore-demo");
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-owner")).toEqual({
+        projectId: "demo",
+        threadId: "thread-demo",
+      }),
+    );
+    await channel.receive("/project use other", "restore-other");
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-owner")).toEqual({
+        projectId: "other",
+        threadId: "thread-other",
+      }),
+    );
+  });
+
+  it("keeps a saved project chat when Codex is temporarily unavailable", async () => {
+    const channel = new FakeChannel();
+    const database = new BridgeDatabase(":memory:");
+    const codex = fakeCodex();
+    vi.mocked(codex.listThreads).mockRejectedValue(new Error("temporary app-server timeout"));
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    database.selectProject("chat-owner", "demo");
+    database.setThread("chat-owner", "demo", "thread-saved");
+
+    await channel.receive("/project use demo", "restore-temporary-failure");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("绑定仍保留"))).toBe(true),
+    );
+    expect(database.getConversation("chat-owner")?.threadId).toBe("thread-saved");
+  });
+
+  it("clears a saved project chat only when Codex confirms it no longer exists", async () => {
+    const channel = new FakeChannel();
+    const database = new BridgeDatabase(":memory:");
+    const codex = fakeCodex();
+    vi.mocked(codex.readThread).mockRejectedValue(new Error("thread not found"));
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    database.selectProject("chat-owner", "demo");
+    database.setThread("chat-owner", "demo", "thread-missing");
+
+    await channel.receive("/project use demo", "restore-missing-thread");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("绑定已清除"))).toBe(true),
+    );
+    expect(database.getConversation("chat-owner")?.threadId).toBeNull();
+  });
+
+  it("rejects duplicate enabled project roots during startup", async () => {
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel: new FakeChannel(),
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [
+        { id: "first", name: "First", rootPath: process.cwd(), enabled: true },
+        { id: "second", name: "Second", rootPath: process.cwd(), enabled: true },
+      ],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await expect(bridge.start()).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
+
+  it("does not enable a project whose real root is already in use", async () => {
+    const channel = new FakeChannel();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [
+        { id: "first", name: "First", rootPath: process.cwd(), enabled: true },
+        { id: "second", name: "Second", rootPath: process.cwd(), enabled: false },
+      ],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("/project enable second", "enable-duplicate-root");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("指向同一目录"))).toBe(true),
+    );
+    expect(database.getProject("second")?.enabled).toBe(false);
+  });
+
+  it("creates, lists, selects, reads, archives, and restores project chats", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/project use demo", "chat-use-project");
+    await channel.receive('/chat new "第一段工作"', "chat-new-first");
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-owner")?.threadId).toBe("thread-created-1"),
+    );
+    expect(codex.nameThread).toHaveBeenCalledWith("thread-created-1", "第一段工作");
+
+    await channel.receive("/chat new 第二段工作", "chat-new-second");
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-owner")?.threadId).toBe("thread-created-2"),
+    );
+    expect(database.getProjectThreadByNumber("demo", 1)?.threadId).toBe("thread-created-1");
+    expect(database.getProjectThreadByNumber("demo", 2)?.threadId).toBe("thread-created-2");
+
+    await channel.receive("/chat list", "chat-list-new");
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some((message) => message.text.includes("#1") && message.text.includes("#2")),
+      ).toBe(true),
+    );
+    await channel.receive("/chat use 1", "chat-select-first");
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-owner")?.threadId).toBe("thread-created-1"),
+    );
+
+    vi.mocked(codex.readThreadDetails).mockResolvedValue({
+      id: "thread-created-1",
+      name: "第一段工作",
+      preview: "已经完成读取",
+      cwd: process.cwd(),
+      updatedAt: Date.now(),
+      status: "notLoaded",
+      turns: [
+        {
+          id: "turn-history",
+          status: "completed",
+          startedAt: null,
+          completedAt: null,
+          messages: [
+            { role: "user", text: "读取 README", phase: null },
+            { role: "assistant", text: "README 已读取", phase: "final_answer" },
+          ],
+        },
+      ],
+    });
+    await channel.receive("/chat show 1", "chat-show-first");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("README 已读取"))).toBe(true),
+    );
+    expect(codex.readThreadDetails).toHaveBeenCalledWith("thread-created-1", true);
+
+    await channel.receive("/chat archive 1", "chat-archive-first");
+    await vi.waitFor(() =>
+      expect(database.getProjectThreadByNumber("demo", 1)?.archived).toBe(true),
+    );
+    expect(database.getConversation("chat-owner")?.threadId).toBeNull();
+    expect(codex.archiveThread).toHaveBeenCalledWith("thread-created-1");
+
+    await channel.receive("/chat unarchive 1", "chat-unarchive-first");
+    await vi.waitFor(() =>
+      expect(database.getProjectThreadByNumber("demo", 1)?.archived).toBe(false),
+    );
+    expect(codex.unarchiveThread).toHaveBeenCalledWith("thread-created-1");
+    expect(database.getConversation("chat-owner")?.threadId).toBeNull();
+  });
+
+  it("rejects an overlong chat title before creating a Codex thread", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    bridge = new Bridge({
+      channel,
+      codex,
+      database: new BridgeDatabase(":memory:"),
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/project use demo", "long-title-project");
+    await channel.receive(`/chat new ${"x".repeat(121)}`, "long-title-chat");
+
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("不能超过 120"))).toBe(true),
+    );
+    expect(codex.startThread).not.toHaveBeenCalled();
+  });
+
+  it("lists archived chats even when newer active chats fill the display window", async () => {
+    const channel = new FakeChannel();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    database.selectProject("chat-owner", "demo");
+    database.upsertThread({
+      threadId: "thread-archived-old",
+      projectId: "demo",
+      title: "Archived target",
+      archived: true,
+      updatedAt: "2020-01-01T00:00:00.000Z",
+    });
+    for (let index = 0; index < 50; index += 1) {
+      database.upsertThread({
+        threadId: `thread-active-${index}`,
+        projectId: "demo",
+        title: `Active ${index}`,
+        archived: false,
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+      });
+    }
+
+    await channel.receive("/chat list archived", "archived-window");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("Archived target"))).toBe(true),
+    );
+  });
+
+  it("creates a runtime project and can use it without restarting", async () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-project-root-"));
+    try {
+      const channel = new FakeChannel();
+      const codex = fakeCodex();
+      const database = new BridgeDatabase(":memory:");
+      bridge = new Bridge({
+        channel,
+        codex,
+        database,
+        config: {
+          ...config,
+          projectManagement: {
+            allowedRoots: [temporaryDirectory],
+            allowCreateDirectory: true,
+            allowRegisterExisting: true,
+            codexDesktopProjects: { enabled: false },
+          },
+        },
+        projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+        allowedOpenId: "owner",
+        logger: pino({ level: "silent" }),
+      });
+      await bridge.start();
+
+      await channel.receive('/project create mobile "手机创建的项目"', "runtime-create");
+      await channel.receive("/project use mobile", "runtime-use");
+      await channel.receive("检查当前目录", "runtime-task");
+
+      const expectedRoot = path.join(temporaryDirectory, "mobile");
+      await vi.waitFor(() =>
+        expect(codex.runTurn).toHaveBeenCalledWith(
+          expect.objectContaining({ cwd: expectedRoot, prompt: "检查当前目录" }),
+        ),
+      );
+      expect(database.getProject("mobile")).toMatchObject({
+        name: "手机创建的项目",
+        enabled: true,
+      });
+      await bridge.stop();
+      bridge = undefined;
+    } finally {
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("automatically synchronizes and selects visible Codex Desktop projects", async () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-desktop-projects-"));
+    const clawRoot = path.join(temporaryDirectory, "claw");
+    const spacedRoot = path.join(temporaryDirectory, "Project With Space");
+    const chineseRoot = path.join(temporaryDirectory, "项目文档");
+    mkdirSync(clawRoot);
+    mkdirSync(spacedRoot);
+    mkdirSync(chineseRoot);
+
+    try {
+      const channel = new FakeChannel();
+      const database = new BridgeDatabase(":memory:");
+      const desktopProjects: DesktopProjectSource = {
+        listProjects: vi.fn(async () => ({
+          sourcePath: path.join(temporaryDirectory, ".codex-global-state.json"),
+          usedBackup: false,
+          projects: [
+            { sourceId: "desktop-claw", name: "claw", rootPaths: [clawRoot], order: 0 },
+            {
+              sourceId: "desktop-spaced",
+              name: "Project With Space",
+              rootPaths: [spacedRoot],
+              order: 1,
+            },
+            {
+              sourceId: "desktop-chinese",
+              name: "项目文档",
+              rootPaths: [chineseRoot],
+              order: 2,
+            },
+          ],
+        })),
+      };
+      bridge = new Bridge({
+        channel,
+        codex: fakeCodex(),
+        database,
+        config: {
+          ...config,
+          projectManagement: {
+            ...config.projectManagement,
+            codexDesktopProjects: { enabled: true },
+          },
+        },
+        projects: [
+          { id: "bridge-dev", name: "ClawBridge development", rootPath: clawRoot, enabled: true },
+        ],
+        desktopProjects,
+        allowedOpenId: "owner",
+        logger: pino({ level: "silent" }),
+      });
+      await bridge.start();
+
+      expect(database.getProject("bridge-dev")).toMatchObject({ name: "claw", rootPath: clawRoot });
+      expect(database.getProject("desktop@desktop-spaced")).toMatchObject({
+        name: "Project With Space",
+        rootPath: spacedRoot,
+        enabled: true,
+      });
+
+      await channel.receive("/projects", "desktop-project-list");
+      await vi.waitFor(() => {
+        const listing = channel.sent.find((message) => message.text.includes("#1 claw"))?.text;
+        expect(listing).toContain(clawRoot);
+        expect(listing).toContain("#2 Project With Space");
+        expect(listing).toContain(spacedRoot);
+        expect(listing).toContain("#3 项目文档");
+      });
+
+      await channel.receive('/project use "Project With Space"', "desktop-project-name");
+      await vi.waitFor(() =>
+        expect(database.getConversation("chat-owner")?.projectId).toBe("desktop@desktop-spaced"),
+      );
+
+      await channel.receive("/project use #3", "desktop-project-number");
+      await vi.waitFor(() =>
+        expect(database.getConversation("chat-owner")?.projectId).toBe("desktop@desktop-chinese"),
+      );
+
+      await bridge.stop();
+      bridge = undefined;
+    } finally {
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("revokes a removed Desktop project before accepting the next ordinary task", async () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-desktop-revoke-"));
+    const projectRoot = path.join(temporaryDirectory, "desktop-only");
+    mkdirSync(projectRoot);
+
+    try {
+      const channel = new FakeChannel();
+      const codex = fakeCodex();
+      const database = new BridgeDatabase(":memory:");
+      let visible = true;
+      const desktopProjects: DesktopProjectSource = {
+        listProjects: vi.fn(async () => ({
+          sourcePath: path.join(temporaryDirectory, ".codex-global-state.json"),
+          usedBackup: false,
+          projects: visible
+            ? [
+                {
+                  sourceId: "desktop-only",
+                  name: "Desktop only",
+                  rootPaths: [projectRoot],
+                  order: 0,
+                },
+              ]
+            : [],
+        })),
+      };
+      bridge = new Bridge({
+        channel,
+        codex,
+        database,
+        config: {
+          ...config,
+          projectManagement: {
+            ...config.projectManagement,
+            codexDesktopProjects: { enabled: true },
+          },
+        },
+        projects: [],
+        desktopProjects,
+        allowedOpenId: "owner",
+        logger: pino({ level: "silent" }),
+      });
+      await bridge.start();
+      await channel.receive('/project use "Desktop only"', "desktop-project-select");
+      await vi.waitFor(() =>
+        expect(database.getConversation("chat-owner")?.projectId).toBe("desktop@desktop-only"),
+      );
+
+      visible = false;
+      await channel.receive("do not run", "desktop-project-revoked-task");
+      await vi.waitFor(() =>
+        expect(channel.sent.some((message) => message.text.includes("已停用"))).toBe(true),
+      );
+      expect(codex.runTurn).not.toHaveBeenCalled();
+
+      await bridge.stop();
+      bridge = undefined;
+    } finally {
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects project switching while a task is running before onStarted", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    let finishTurn:
+      | ((value: { threadId: string; turnId: string; finalText: string }) => void)
+      | undefined;
+    codex.runTurn = vi.fn(
+      () =>
+        new Promise<{ threadId: string; turnId: string; finalText: string }>((resolve) => {
+          finishTurn = resolve;
+        }),
+    );
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [
+        { id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true },
+        { id: "other", name: "Other", rootPath: path.dirname(process.cwd()), enabled: true },
+      ],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/project use demo", "running-use-demo");
+    await channel.receive("长任务", "running-task");
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
+    await channel.receive("/project use other", "running-switch-other");
+
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("不能切换项目"))).toBe(true),
+    );
+    expect(database.getConversation("chat-owner")?.projectId).toBe("demo");
+    finishTurn?.({ threadId: "thread-late", turnId: "turn-late", finalText: "完成" });
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("✅ completed"))).toBe(true),
+    );
+  });
+
+  it("waits for the active task worker before closing the database", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    let rejectTurn: ((error: Error) => void) | undefined;
+    codex.runTurn = vi.fn(
+      (input: Parameters<CodexRunner["runTurn"]>[0]) =>
+        new Promise<never>((_, reject) => {
+          rejectTurn = reject;
+          input.onStarted?.({ threadId: "thread-shutdown", turnId: "turn-shutdown" });
+        }),
+    );
+    codex.stop = vi.fn(async () => {
+      setTimeout(() => rejectTurn?.(new Error("app-server stopped")), 10);
+    });
+    const database = new BridgeDatabase(":memory:");
+    const order: string[] = [];
+    const updateTask = database.updateTask.bind(database);
+    vi.spyOn(database, "updateTask").mockImplementation((...args) => {
+      if (args[1] === "failed") order.push("task-settled");
+      return updateTask(...args);
+    });
+    const close = database.close.bind(database);
+    vi.spyOn(database, "close").mockImplementation(() => {
+      order.push("database-closed");
+      close();
+    });
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("long shutdown task", "shutdown-task");
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
+
+    await bridge.stop();
+    bridge = undefined;
+
+    expect(order).toEqual(["task-settled", "database-closed"]);
+  });
+
+  it("waits for an in-flight delivery before closing the database", async () => {
+    const channel = new FakeChannel({ blockFirstSend: true });
+    vi.spyOn(channel, "stop").mockImplementation(async () => channel.releaseFirstSend());
+    const database = new BridgeDatabase(":memory:");
+    const order: string[] = [];
+    const markDeliverySent = database.markDeliverySent.bind(database);
+    vi.spyOn(database, "markDeliverySent").mockImplementation((...args) => {
+      order.push("delivery-settled");
+      return markDeliverySent(...args);
+    });
+    const close = database.close.bind(database);
+    vi.spyOn(database, "close").mockImplementation(() => {
+      order.push("database-closed");
+      close();
+    });
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("delivery shutdown task", "shutdown-delivery");
+    await vi.waitFor(() => expect(channel.sendAttempts).toBe(1));
+
+    await bridge.stop();
+    bridge = undefined;
+
+    expect(order.at(-1)).toBe("database-closed");
+    expect(order).toContain("delivery-settled");
+  });
+
+  it("does not restart Codex when shutdown begins during a pre-Codex await", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    const instance = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    bridge = instance;
+    await instance.start();
+    database.selectProject("chat-owner", "demo");
+
+    let releasePath: (() => void) | undefined;
+    let markPathAwaitStarted: (() => void) | undefined;
+    const pathAwaitStarted = new Promise<void>((resolve) => {
+      markPathAwaitStarted = resolve;
+    });
+    vi.spyOn(
+      instance as unknown as {
+        resolveRuntimeProjectPath(rootPath: string): Promise<string>;
+      },
+      "resolveRuntimeProjectPath",
+    ).mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          releasePath = () => resolve(process.cwd());
+          markPathAwaitStarted?.();
+        }),
+    );
+
+    await channel.receive("/chat new shutdown-race", "shutdown-before-codex");
+    await pathAwaitStarted;
+    const stopping = instance.stop();
+    await vi.waitFor(() => expect(codex.stop).toHaveBeenCalled());
+    releasePath?.();
+    await stopping;
+    bridge = undefined;
+
+    expect(codex.startThread).not.toHaveBeenCalled();
+    expect(codex.stop).toHaveBeenCalledTimes(2);
+  });
+});
