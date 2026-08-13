@@ -79,6 +79,16 @@
 - 群话题审批卡通过 interactive reply 回到原话题；回调必须命中 Bridge 已成功发送的同 chat、同 audience 卡片，并再次验证项目群 owner
 - `isSecret` 问题不会进入飞书消息或日志；无活动 thread/turn 所有权的 server request 会被拒绝
 
+### ClawBridge 2.0-E：图片与文档附件
+
+- 飞书消息解析支持 `image` 和 `file` 两类消息，并只保留资源 key、显示名称与类型；文件名不会直接参与本机路径拼接
+- 任务入队时在 SQLite v10 中固化原消息 ID 和附件元数据，重启或排队期间不会把附件关联到另一条消息
+- 飞书适配器通过消息资源接口下载附件，在写入前检查声明大小、写入后再次检查实际大小；超限文件会拒绝并删除临时副本
+- 图片使用 Codex `localImage` 输入；普通文档仅允许 txt、md、json、yaml、yml、csv、log、xml、pdf，并以隔离本机路径追加到文本输入
+- 每个任务使用独立的随机任务目录；无论成功、失败、取消或超时，任务终态都会递归清理该目录
+- 默认单附件上限为 20 MiB，临时根目录默认为 `./data/attachments`，两者都可在 `bridge` 配置段调整
+- 自动测试覆盖图片/文件事件解析、飞书下载契约、声明大小拒绝、任务快照持久化、Codex `localImage` 输入及任务完成后的目录清理；真实飞书附件 E2E 仍需现场验证
+
 方法语义参考 [OpenAI 官方 Codex App Server 文档](https://developers.openai.com/codex/app-server)，未依赖实验性的对话分页接口。实际 JSON-RPC wire 字段和枚举以本机 Codex CLI `0.147.0` 运行 `codex app-server generate-json-schema` 生成的 schema 为当前基线，并已用同一二进制完成真实验证。
 
 2026-08-11 的 App Server smoke 覆盖 `initialize`、最小只读回合、新建、命名、历史读取、未归档列表、归档列表、恢复和最终再次归档，所有断言均通过。测试对话最终保持归档。该结论不代表跨版本兼容，也不代表飞书中的旧 Bridge 进程已经重新加载本次构建。

@@ -24,7 +24,7 @@ describe("Feishu message contract", () => {
     expect(message).toMatchObject({ eventId: "evt-1", senderOpenId: "ou-1", text: "run tests" });
   });
 
-  it("ignores non-text messages", () => {
+  it("parses image and file attachments", () => {
     expect(
       parseFeishuMessage({
         header: { event_id: "evt-2" },
@@ -35,11 +35,27 @@ describe("Feishu message contract", () => {
             chat_id: "oc-1",
             chat_type: "p2p",
             message_type: "image",
-            content: "{}",
+            content: JSON.stringify({ image_key: "img-1" }),
           },
         },
       }),
-    ).toBeNull();
+    ).toMatchObject({
+      text: "请分析这张图片。",
+      attachments: [{ key: "img-1", name: "img-1.jpg", type: "image" }],
+    });
+    expect(
+      parseFeishuMessage({
+        event_id: "evt-file",
+        sender: { sender_id: { open_id: "ou-1" } },
+        message: {
+          message_id: "om-file",
+          chat_id: "oc-1",
+          chat_type: "p2p",
+          message_type: "file",
+          content: JSON.stringify({ file_key: "file-1", file_name: "notes.md" }),
+        },
+      }),
+    ).toMatchObject({ attachments: [{ key: "file-1", name: "notes.md", type: "file" }] });
   });
 
   it("parses the flattened payload emitted by the Node SDK dispatcher", () => {

@@ -111,6 +111,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
   async runTurn(input: {
     cwd: string;
     prompt: string;
+    inputs?: import("./protocol-types.js").CodexUserInput[];
     threadId?: string | null;
     approvalPolicy: "unlessTrusted" | "onRequest" | "never";
     sandbox: "readOnly" | "workspaceWrite";
@@ -137,7 +138,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
     try {
       const startedTurn = await this.request("turn/start", {
         threadId,
-        input: [{ type: "text", text: input.prompt }],
+        input: input.inputs ?? [{ type: "text", text: input.prompt }],
         cwd: input.cwd,
         approvalPolicy,
         sandboxPolicy:

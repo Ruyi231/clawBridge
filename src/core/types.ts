@@ -18,6 +18,11 @@ export interface InboundMessage {
   feishuThreadId?: string | undefined;
   senderOpenId: string;
   text: string;
+  attachments?: Array<{
+    key: string;
+    name: string;
+    type: "image" | "file";
+  }>;
   receivedAt: string;
 }
 
@@ -40,6 +45,7 @@ export type InboundEvent = InboundMessage | InboundCardAction;
 export interface TaskRecord {
   id: string;
   eventId: string;
+  messageId: string;
   chatId: string;
   projectId: string;
   prompt: string;
@@ -51,6 +57,7 @@ export interface TaskRecord {
   progressSummary: string | null;
   model: string | null;
   reasoningEffort: string | null;
+  attachments: Array<{ key: string; name: string; type: "image" | "file" }>;
   createdAt: string;
   updatedAt: string;
   error: string | null;

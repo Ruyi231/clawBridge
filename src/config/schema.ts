@@ -20,6 +20,13 @@ export const bridgeConfigSchema = z.object({
     maxConcurrency: z.number().int().min(1).max(4).default(1),
     deliveryMaxAttempts: z.number().int().min(1).max(20).default(5),
     deliveryRetryBaseMs: z.number().int().min(10).max(60_000).default(1_000),
+    attachmentDirectory: z.string().min(1).default("./data/attachments"),
+    attachmentMaxBytes: z
+      .number()
+      .int()
+      .min(1_024)
+      .max(100 * 1024 * 1024)
+      .default(20 * 1024 * 1024),
   }),
   feishu: z.object({
     appIdEnv: envName,

@@ -1,9 +1,13 @@
 import pino from "pino";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const larkMocks = vi.hoisted(() => ({
   createMessage: vi.fn(),
   replyMessage: vi.fn(),
+  getMessageResource: vi.fn(),
   createChat: vi.fn(),
   createCard: vi.fn(),
   updateCardContent: vi.fn(),
@@ -24,6 +28,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
     }
     readonly im = {
       message: { create: larkMocks.createMessage, reply: larkMocks.replyMessage },
+      messageResource: { get: larkMocks.getMessageResource },
       chat: { create: larkMocks.createChat },
     };
     readonly cardkit = {
@@ -77,6 +82,10 @@ describe("Feishu adapter card contract", () => {
     larkMocks.replyMessage.mockResolvedValue({
       code: 0,
       data: { message_id: "om-reply-1" },
+    });
+    larkMocks.getMessageResource.mockResolvedValue({
+      headers: { "content-length": "4" },
+      writeFile: async (targetPath: string) => writeFile(targetPath, "test"),
     });
     larkMocks.createChat.mockResolvedValue({
       code: 0,
@@ -279,6 +288,55 @@ describe("Feishu adapter card contract", () => {
       },
     });
     expect(larkMocks.createMessage).not.toHaveBeenCalled();
+  });
+
+  it("downloads a Feishu message resource within the configured size limit", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+    const directory = await mkdtemp(path.join(tmpdir(), "clawbridge-attachment-"));
+    const targetPath = path.join(directory, "photo.jpg");
+    try {
+      await adapter.downloadAttachment({
+        messageId: "om-image",
+        fileKey: "img-key",
+        type: "image",
+        targetPath,
+        maxBytes: 8,
+      });
+
+      expect(larkMocks.getMessageResource).toHaveBeenCalledWith({
+        params: { type: "image" },
+        path: { message_id: "om-image", file_key: "img-key" },
+      });
+      await expect(readFile(targetPath, "utf8")).resolves.toBe("test");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an attachment whose declared size exceeds the configured limit", async () => {
+    const writeResource = vi.fn();
+    larkMocks.getMessageResource.mockResolvedValueOnce({
+      headers: { "content-length": "1024" },
+      writeFile: writeResource,
+    });
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.downloadAttachment({
+        messageId: "om-file",
+        fileKey: "file-key",
+        type: "file",
+        targetPath: path.join(tmpdir(), "must-not-be-written.txt"),
+        maxBytes: 32,
+      }),
+    ).rejects.toThrow("Attachment exceeds configured size limit");
+    expect(writeResource).not.toHaveBeenCalled();
   });
 
   it("rejects a successful API response without a message id", async () => {

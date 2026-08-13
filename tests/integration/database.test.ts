@@ -89,6 +89,38 @@ describe("task persistence", () => {
     expect(database.hasOpenTaskForThread("thread-at-enqueue")).toBe(false);
   });
 
+  it("persists the source message and attachment metadata with the queued task", () => {
+    const queued = database.enqueue(
+      {
+        ...message,
+        eventId: "attachment-event",
+        messageId: "attachment-message",
+        attachments: [
+          { key: "img-key", name: "photo.jpg", type: "image" },
+          { key: "file-key", name: "notes.md", type: "file" },
+        ],
+      },
+      "demo",
+      "thread-with-attachments",
+    );
+
+    expect(queued).toMatchObject({
+      messageId: "attachment-message",
+      threadId: "thread-with-attachments",
+      attachments: [
+        { key: "img-key", name: "photo.jpg", type: "image" },
+        { key: "file-key", name: "notes.md", type: "file" },
+      ],
+    });
+    expect(database.getTask(queued!.id)).toMatchObject({
+      messageId: "attachment-message",
+      attachments: [
+        { key: "img-key", name: "photo.jpg", type: "image" },
+        { key: "file-key", name: "notes.md", type: "file" },
+      ],
+    });
+  });
+
   it("claims, retries, and completes persisted deliveries", () => {
     const queued = database.queueDelivery({ chatId: "chat-1", body: "hello" });
     const firstAttempt = database.claimNextDelivery();

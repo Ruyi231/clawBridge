@@ -36,6 +36,11 @@ const sdkEventSchema = z.object({
 });
 
 const contentSchema = z.object({ text: z.string() });
+const imageContentSchema = z.object({ image_key: z.string().min(1) });
+const fileContentSchema = z.object({
+  file_key: z.string().min(1),
+  file_name: z.string().min(1).max(255),
+});
 
 const cardOperatorSchema = z.object({ open_id: z.string().min(1) });
 const cardContextSchema = z.object({
@@ -79,8 +84,22 @@ export function parseFeishuMessage(payload: unknown): InboundMessage | null {
   const sender = envelope?.event.sender ?? sdkEvent?.sender;
   const message = envelope?.event.message ?? sdkEvent?.message;
   if (!sender || !message) throw new Error("Feishu event is missing sender or message");
-  if (message.message_type !== "text") return null;
-  const content = contentSchema.parse(JSON.parse(message.content));
+  const rawContent = JSON.parse(message.content) as unknown;
+  let text = "";
+  let attachments: InboundMessage["attachments"];
+  if (message.message_type === "text") {
+    text = contentSchema.parse(rawContent).text.trim();
+  } else if (message.message_type === "image") {
+    const content = imageContentSchema.parse(rawContent);
+    text = "请分析这张图片。";
+    attachments = [{ key: content.image_key, name: `${content.image_key}.jpg`, type: "image" }];
+  } else if (message.message_type === "file") {
+    const content = fileContentSchema.parse(rawContent);
+    text = `请阅读并处理附件 ${content.file_name}。`;
+    attachments = [{ key: content.file_key, name: content.file_name, type: "file" }];
+  } else {
+    return null;
+  }
   const timestamp = envelope?.header.create_time ?? sdkEvent?.create_time ?? message.create_time;
   return {
     eventId: eventId ?? `message:${message.message_id}`,
@@ -92,7 +111,8 @@ export function parseFeishuMessage(payload: unknown): InboundMessage | null {
       : {}),
     ...(message.thread_id ? { feishuThreadId: message.thread_id } : {}),
     senderOpenId: sender.sender_id.open_id,
-    text: content.text.trim(),
+    text,
+    ...(attachments ? { attachments } : {}),
     receivedAt: timestamp ? new Date(Number(timestamp)).toISOString() : new Date().toISOString(),
   };
 }

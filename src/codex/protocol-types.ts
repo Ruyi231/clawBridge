@@ -31,6 +31,8 @@ export interface CodexTurnResult {
   finalText: string;
 }
 
+export type CodexUserInput = { type: "text"; text: string } | { type: "localImage"; path: string };
+
 export interface CodexThreadSummary {
   id: string;
   name: string | null;
@@ -123,6 +125,7 @@ export interface CodexRunner {
   runTurn(input: {
     cwd: string;
     prompt: string;
+    inputs?: CodexUserInput[];
     threadId?: string | null;
     approvalPolicy: "unlessTrusted" | "onRequest" | "never";
     sandbox: "readOnly" | "workspaceWrite";

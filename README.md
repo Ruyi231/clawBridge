@@ -2,7 +2,7 @@
 
 ClawBridge 是一个运行在 Windows 本机的单用户控制桥：它通过飞书长连接接收手机消息，将任务送入本机 Codex App Server，再把结果发回飞书。电脑无需开放公网端口。
 
-当前仓库已完成 Phase 0–2 以及 ClawBridge 2.0-A/B/C/D 的本地实现：除原有单聊控制台、项目/对话管理和持久队列外，还增加了项目群/对话话题隔离、任务中心、CardKit 流式任务卡、卡片新建项目、按对话保存模型与推理强度，以及命令/文件审批和 Codex 提问卡片。
+当前仓库已完成 Phase 0–2 以及 ClawBridge 2.0-A/B/C/D/E 的本地实现：除原有单聊控制台、项目/对话管理和持久队列外，还增加了项目群/对话话题隔离、任务中心、CardKit 流式任务卡、卡片新建项目、按对话保存模型与推理强度、命令/文件审批和 Codex 提问卡片，以及图片与受限文档附件输入。
 
 ## 环境要求
 
@@ -107,6 +107,8 @@ projectManagement:
 选择项目后还会出现“项目群”按钮。首次点击会创建只包含当前用户和机器人的私有 thread-style 群；若当前已选择对话，还会为该 Codex 对话创建对应的话题根消息。“新对话”会自动完成这两个动作。以后在该话题中直接发普通文本，Bridge 会按 `群 chat_id + 话题 root_id` 固定路由到绑定对话，入队、完成、失败和停止结果也只回复到原话题。未登记的群、非话题消息、错误项目或其他发送者会被拒绝。
 
 任务开始后，Bridge 会在原话题创建 CardKit 流式卡片，并把 Codex 的 `item/agentMessage/delta` 以约 400 ms 节流更新到同一张卡片；计划更新也会进入任务摘要。流式卡片创建或更新失败不会让 Codex 任务失败，最终文本仍通过持久 outbox 可靠发送。SQLite 会保存最近的增量正文与摘要，Bridge 重启后任务中心仍可查询。
+
+可以直接向机器人单聊或已登记的项目话题发送图片、文本、Markdown、JSON、YAML、CSV、日志、XML 或 PDF 文件。Bridge 会先将附件元数据和原飞书消息 ID 固化到任务快照，再按任务下载到 `bridge.attachmentDirectory` 下的隔离临时目录；图片通过 Codex `localImage` 输入提交，普通文档以明确的本机只读路径附加到任务说明。单个附件默认上限为 20 MiB，可用 `bridge.attachmentMaxBytes` 调整；任务结束后临时目录会自动删除。未知文件类型、超限文件或不支持附件下载的通道会安全失败，不会把飞书文件名当作本机路径使用。
 
 当前卡片 MVP 的项目列表和对话列表每页最多显示 10 条，可用“上一页/下一页”浏览。对话数据仍受 Codex 最近 50 条未归档记录的同步窗口约束；更早记录及其他高级操作可继续使用 `/project list`、`/chat list` 等文本命令。全部原有命令仍保留。
 
@@ -270,7 +272,7 @@ npm test
 - Codex 仅允许 `readOnly` 或 `workspaceWrite`，配置 schema 不接受 `dangerFullAccess`。
 - 项目可以来自 Codex Desktop 当前可见本地项目、`config/projects.yaml` 静态登记，或受 `projectManagement.allowedRoots` 约束的手工创建/导入流程。Desktop 自动同步模式由本机配置显式开启。
 - 日志和外发消息会遮盖常见 Token、Authorization 头和密钥字段。
-- 当前版本还没有手机审批 broker，因此默认使用 `approvalPolicy: never`；若手动改为按需审批，Bridge 会拒绝命令/文件审批及其他不支持的交互请求，避免无人值守误批准或无限等待。
+- 当前版本已支持命令执行、文件修改和非秘密提问的手机审批 broker；启用 `approvalPolicy: onRequest` 后仍只允许当前任务的一次性卡片决策。秘密输入和未知 server request 会继续拒绝，避免凭据进入飞书或无人值守无限等待。
 - App Server RPC 默认 30 秒超时，完整 Codex 回合默认 10 分钟超时；回合超时后 Bridge 会主动发送 `turn/interrupt`，避免遗留后台任务。
 
 完整路线与 Gate 定义见 [BRIDGE_PLAN.md](BRIDGE_PLAN.md)，当前进度见 [docs/PHASE2_STATUS.md](docs/PHASE2_STATUS.md)，安全边界见 [docs/SECURITY.md](docs/SECURITY.md)。

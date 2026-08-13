@@ -24,4 +24,11 @@ export interface ChannelAdapter {
   }): Promise<{ streamId: string; messageId: string }>;
   updateTaskStream?(streamId: string, content: string): Promise<void>;
   finishTaskStream?(streamId: string, summary: string): Promise<void>;
+  downloadAttachment?(input: {
+    messageId: string;
+    fileKey: string;
+    type: "image" | "file";
+    targetPath: string;
+    maxBytes: number;
+  }): Promise<void>;
 }

@@ -181,6 +181,30 @@ export class FeishuAdapter implements ChannelAdapter {
     return messageId;
   }
 
+  async downloadAttachment(input: {
+    messageId: string;
+    fileKey: string;
+    type: "image" | "file";
+    targetPath: string;
+    maxBytes: number;
+  }): Promise<void> {
+    const resource = await this.client.im.messageResource.get({
+      params: { type: input.type === "image" ? "image" : "file" },
+      path: { message_id: input.messageId, file_key: input.fileKey },
+    });
+    const declaredLength = Number(resource.headers?.["content-length"] ?? 0);
+    if (declaredLength > input.maxBytes)
+      throw new Error("Attachment exceeds configured size limit");
+    await resource.writeFile(input.targetPath);
+    const { size } = await import("node:fs/promises").then((fs) => fs.stat(input.targetPath));
+    if (size > input.maxBytes) {
+      await import("node:fs/promises").then((fs) =>
+        fs.unlink(input.targetPath).catch(() => undefined),
+      );
+      throw new Error("Attachment exceeds configured size limit");
+    }
+  }
+
   async createProjectSpace(input: {
     projectId: string;
     projectName: string;

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { stat } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { ChannelAdapter } from "../channels/channel-adapter.js";
@@ -430,6 +430,7 @@ export class Bridge {
     const holder = `task:${task.id}`;
     let streamId: string | undefined;
     let streamPump: TaskStreamPump | undefined;
+    let attachmentDirectory: string | undefined;
     if (threadId && !database.acquireLease(threadId, holder, config.codex.turnTimeoutMs + 30_000)) {
       database.updateTask(task.id, "failed", { error: "Thread is already leased" });
       this.reply(
@@ -467,9 +468,52 @@ export class Bridge {
       }
       const cwd = await this.resolveRuntimeProjectPath(project.rootPath);
       this.assertNotStopping();
+      const inputs: import("../codex/protocol-types.js").CodexUserInput[] = [];
+      const fileHints: string[] = [];
+      if (task.attachments.length) {
+        if (!channel.downloadAttachment) throw new Error("当前消息通道不支持下载附件。 ");
+        attachmentDirectory = path.resolve(config.bridge.attachmentDirectory, task.id);
+        await mkdir(attachmentDirectory, { recursive: true });
+        for (const [index, attachment] of task.attachments.entries()) {
+          const extension = path.extname(attachment.name).toLowerCase();
+          const allowedFileExtensions = new Set([
+            ".txt",
+            ".md",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".csv",
+            ".log",
+            ".xml",
+            ".pdf",
+          ]);
+          if (attachment.type === "file" && !allowedFileExtensions.has(extension)) {
+            throw new Error(`不支持附件类型 ${extension || "无扩展名"}。`);
+          }
+          const safeName = `${index + 1}-${attachment.type === "image" ? "image.jpg" : `file${extension}`}`;
+          const targetPath = path.join(attachmentDirectory, safeName);
+          await channel.downloadAttachment({
+            messageId: task.messageId,
+            fileKey: attachment.key,
+            type: attachment.type,
+            targetPath,
+            maxBytes: config.bridge.attachmentMaxBytes,
+          });
+          if (attachment.type === "image") inputs.push({ type: "localImage", path: targetPath });
+          else fileHints.push(targetPath);
+        }
+      }
+      inputs.unshift({
+        type: "text",
+        text:
+          fileHints.length > 0
+            ? `${task.prompt}\n\n附件已安全下载到以下只读输入路径：\n${fileHints.join("\n")}`
+            : task.prompt,
+      });
       const result = await codex.runTurn({
         cwd,
         prompt: task.prompt,
+        inputs,
         threadId,
         approvalPolicy: config.codex.approvalPolicy,
         sandbox: config.codex.sandbox,
@@ -597,6 +641,7 @@ export class Bridge {
         if (pending.taskId !== task.id) continue;
         this.pendingInteractions.delete(token);
       }
+      if (attachmentDirectory) await rm(attachmentDirectory, { recursive: true, force: true });
       if (activeThreadId && !this.stopping) {
         const released = await this.releaseThreadSubscription(activeThreadId, {
           context: "completed task",

@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   progress_summary TEXT,
   model TEXT,
   reasoning_effort TEXT,
+  attachments_json TEXT NOT NULL DEFAULT '[]',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   error TEXT
@@ -256,6 +257,7 @@ interface FeishuThreadRouteRow {
 interface TaskRow {
   task_id: string;
   event_id: string;
+  message_id: string;
   chat_id: string;
   project_id: string;
   prompt: string;
@@ -266,6 +268,7 @@ interface TaskRow {
   progress_summary: string | null;
   model: string | null;
   reasoning_effort: string | null;
+  attachments_json: string;
   created_at: string;
   updated_at: string;
   error: string | null;
@@ -292,6 +295,7 @@ function toTask(row: TaskRow): TaskRecord {
   return {
     id: row.task_id,
     eventId: row.event_id,
+    messageId: row.message_id,
     chatId: row.chat_id,
     projectId: row.project_id,
     prompt: row.prompt,
@@ -302,6 +306,7 @@ function toTask(row: TaskRow): TaskRecord {
     progressSummary: row.progress_summary,
     model: row.model,
     reasoningEffort: row.reasoning_effort,
+    attachments: JSON.parse(row.attachments_json) as TaskRecord["attachments"],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     error: row.error,
@@ -433,6 +438,7 @@ export class BridgeDatabase {
     this.migrateTaskReplyRouting();
     this.migrateTaskProgress();
     this.migrateThreadExecutionSettings();
+    this.migrateTaskAttachments();
   }
 
   close(): void {
@@ -1114,8 +1120,8 @@ export class BridgeDatabase {
         `
       INSERT OR IGNORE INTO tasks(
         task_id, event_id, message_id, chat_id, project_id, prompt, state, thread_id,
-        reply_to_message_id, model, reasoning_effort, created_at, updated_at
-      ) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+        reply_to_message_id, model, reasoning_effort, attachments_json, created_at, updated_at
+      ) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
     `,
       )
       .run(
@@ -1129,6 +1135,7 @@ export class BridgeDatabase {
         message.topicRootId ?? null,
         execution?.model ?? null,
         execution?.reasoningEffort ?? null,
+        JSON.stringify(message.attachments ?? []),
         now,
         now,
       );
@@ -1796,6 +1803,26 @@ export class BridgeDatabase {
     )`);
     this.database
       .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(9, ?)")
+      .run(new Date().toISOString());
+  }
+
+  private migrateTaskAttachments(): void {
+    const applied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 10")
+      .get();
+    if (applied) return;
+    const columns = new Set(
+      (this.database.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!columns.has("attachments_json")) {
+      this.database.exec(
+        "ALTER TABLE tasks ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'",
+      );
+    }
+    this.database
+      .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(10, ?)")
       .run(new Date().toISOString());
   }
 }

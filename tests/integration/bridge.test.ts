@@ -1,6 +1,6 @@
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ChannelAdapter } from "../../src/channels/channel-adapter.js";
@@ -29,6 +29,10 @@ class FakeChannel implements ChannelAdapter {
   }));
   readonly updateTaskStream = vi.fn(async () => undefined);
   readonly finishTaskStream = vi.fn(async () => undefined);
+  readonly downloadAttachment = vi.fn(async (input: { targetPath: string }) => {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(input.targetPath, "attachment content");
+  });
 
   constructor(options: { failures?: number; blockFirstSend?: boolean } = {}) {
     this.remainingFailures = options.failures ?? 0;
@@ -72,6 +76,23 @@ class FakeChannel implements ChannelAdapter {
       chatType: "p2p",
       senderOpenId: "owner",
       text,
+      receivedAt: new Date().toISOString(),
+    });
+  }
+
+  async receiveAttachment(
+    attachment: { key: string; name: string; type: "image" | "file" },
+    eventId: string,
+  ): Promise<void> {
+    if (!this.callback) throw new Error("channel has not started");
+    await this.callback({
+      eventId,
+      messageId: `message-${eventId}`,
+      chatId: "chat-owner",
+      chatType: "p2p",
+      senderOpenId: "owner",
+      text: `process ${attachment.name}`,
+      attachments: [attachment],
       receivedAt: new Date().toISOString(),
     });
   }
@@ -130,6 +151,8 @@ const config: BridgeConfig = {
     maxConcurrency: 1,
     deliveryMaxAttempts: 5,
     deliveryRetryBaseMs: 10,
+    attachmentDirectory: "./data/attachments-test",
+    attachmentMaxBytes: 1024 * 1024,
   },
   feishu: {
     appIdEnv: "APP_ID",
@@ -398,6 +421,49 @@ describe("Bridge vertical slice", () => {
     expect(value).toMatchObject({ answer: "安全", questionId: "choice" });
     await channel.receiveCard(value!, "question-answer");
     await vi.waitFor(() => expect(database.listTasks({ limit: 1 })[0]?.state).toBe("completed"));
+  });
+
+  it("downloads an image attachment into a task directory and cleans it after completion", async () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-attachments-"));
+    try {
+      const channel = new FakeChannel();
+      const codex = fakeCodex();
+      const database = new BridgeDatabase(":memory:");
+      bridge = new Bridge({
+        channel,
+        codex,
+        database,
+        config: {
+          ...config,
+          bridge: { ...config.bridge, attachmentDirectory: temporaryDirectory },
+        },
+        projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+        allowedOpenId: "owner",
+        logger: pino({ level: "silent" }),
+      });
+      await bridge.start();
+      await channel.receiveAttachment(
+        { key: "image-key", name: "photo.jpg", type: "image" },
+        "image-task",
+      );
+      await vi.waitFor(() => expect(database.listTasks({ limit: 1 })[0]?.state).toBe("completed"));
+      expect(channel.downloadAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messageId: "message-image-task",
+          fileKey: "image-key",
+          type: "image",
+        }),
+      );
+      expect(vi.mocked(codex.runTurn).mock.calls[0]?.[0].inputs).toEqual([
+        expect.objectContaining({ type: "text" }),
+        expect.objectContaining({ type: "localImage", path: expect.stringContaining("image.jpg") }),
+      ]);
+      expect(
+        existsSync(path.join(temporaryDirectory, database.listTasks({ limit: 1 })[0]!.id)),
+      ).toBe(false);
+    } finally {
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
   });
 
   it("persists an inbound message, runs Codex, and sends the final result", async () => {

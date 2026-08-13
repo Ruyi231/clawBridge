@@ -4,6 +4,8 @@ bridge:
   maxConcurrency: 1
   deliveryMaxAttempts: 5
   deliveryRetryBaseMs: 1000
+  attachmentDirectory: ./data/attachments
+  attachmentMaxBytes: 20971520
 
 feishu:
   appIdEnv: CLAWBRIDGE_FEISHU_APP_ID

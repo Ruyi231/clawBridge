@@ -42,6 +42,10 @@ export async function loadConfig(
       bridge: {
         ...config.bridge,
         databasePath: resolveFromConfig(absoluteConfigPath, config.bridge.databasePath),
+        attachmentDirectory: resolveFromConfig(
+          absoluteConfigPath,
+          config.bridge.attachmentDirectory,
+        ),
       },
       projectManagement: {
         ...config.projectManagement,
