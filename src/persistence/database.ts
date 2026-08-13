@@ -955,6 +955,16 @@ export class BridgeDatabase {
     return row ? toThreadIndex(row) : undefined;
   }
 
+  clearThreadBindingsForThread(projectId: string, threadId: string): number {
+    return this.database
+      .prepare(
+        `UPDATE project_chat_state
+         SET active_thread_id = NULL, updated_at = ?
+         WHERE project_id = ? AND active_thread_id = ?`,
+      )
+      .run(new Date().toISOString(), projectId, threadId).changes;
+  }
+
   bindFeishuProjectSpace(input: {
     projectId: string;
     chatId: string;
@@ -1082,6 +1092,13 @@ export class BridgeDatabase {
         .prepare("SELECT * FROM feishu_thread_routes WHERE project_id = ? ORDER BY updated_at DESC")
         .all(projectId) as FeishuThreadRouteRow[]
     ).map((row) => this.toFeishuThreadRoute(row));
+  }
+
+  deleteFeishuThreadRoute(threadId: string): boolean {
+    return (
+      this.database.prepare("DELETE FROM feishu_thread_routes WHERE thread_id = ?").run(threadId)
+        .changes > 0
+    );
   }
 
   private toFeishuProjectSpace(row: FeishuProjectSpaceRow): FeishuProjectSpaceRecord {

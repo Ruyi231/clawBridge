@@ -29,7 +29,7 @@ import type { BridgeDatabase, ProjectRecord, ThreadIndexRecord } from "../persis
 import type { DesktopProjectSource } from "../projects/codex-desktop-project-discovery.js";
 import { ProjectManager } from "../projects/project-manager.js";
 import { authorizeMessage } from "../security/authorization.js";
-import { resolveProjectPath } from "../security/path-policy.js";
+import { areSameResolvedPath, resolveProjectPath } from "../security/path-policy.js";
 import {
   parseCommand,
   type ChatCommand,
@@ -607,6 +607,16 @@ export class Bridge {
           lastSyncedAt: new Date().toISOString(),
         });
       }
+      if (activeThreadId && this.isMissingRolloutError(error)) {
+        database.upsertThread({
+          threadId: activeThreadId,
+          projectId: task.projectId,
+          status: "unavailable",
+          lastSyncedAt: new Date().toISOString(),
+        });
+        database.clearThreadBindingsForThread(task.projectId, activeThreadId);
+        database.deleteFeishuThreadRoute(activeThreadId);
+      }
       if (error instanceof BridgeError && error.code === "CODEX_INTERRUPTED") {
         logger.info({ taskId: task.id }, "Task cancelled");
         database.updateTask(task.id, "cancelled", { error: null });
@@ -628,7 +638,9 @@ export class Bridge {
           task.chatId,
           renderFinalReply({
             state: "failed",
-            text: detail,
+            text: this.isMissingRolloutError(error)
+              ? "该对话没有可恢复的 Codex 历史，通常是只创建但尚未成功执行过任务的空对话。绑定和旧项目话题已自动解除；请在机器人单聊中重新选择一个有内容的对话，或新建对话后直接发送第一条任务。"
+              : detail,
             projectId: project.name,
             threadId: activeThreadId,
           }),
@@ -1175,9 +1187,12 @@ export class Bridge {
     const projectRoot = await this.resolveRuntimeProjectPath(project.rootPath);
     this.assertNotStopping();
     await this.refreshThreadList(project, projectRoot);
-    const rows = database
-      .listProjectThreads(project.id, { includeArchived: false })
-      .filter((row) => !row.archived);
+    const indexedRows = database.listProjectThreads(project.id, { includeArchived: false });
+    for (const row of indexedRows.filter((candidate) => this.isUnusableEmptyThread(candidate))) {
+      database.clearThreadBindingsForThread(project.id, row.threadId);
+      database.deleteFeishuThreadRoute(row.threadId);
+    }
+    const rows = indexedRows.filter((row) => !row.archived && !this.isUnusableEmptyThread(row));
     const totalPages = Math.max(1, Math.ceil(rows.length / 10));
     const page = Math.min(requestedPage, totalPages - 1);
     const offset = page * 10;
@@ -1381,7 +1396,7 @@ export class Bridge {
           }
           return;
         }
-        if (!savedSummary.cwd || !this.samePath(savedSummary.cwd, projectRoot)) {
+        if (!(await this.threadBelongsToProject(savedSummary, projectRoot))) {
           database.selectProject(chatId, project.id);
           database.clearThread(chatId, project.id);
           this.reply(
@@ -1470,7 +1485,7 @@ export class Bridge {
       let record: ThreadIndexRecord | undefined;
       try {
         try {
-          this.validateThreadProject(summary, projectRoot);
+          await this.validateThreadProject(summary, projectRoot);
           record = this.indexThread(project.id, summary, false);
           database.setThread(chatId, project.id, summary.id);
         } catch (error) {
@@ -1531,11 +1546,16 @@ export class Bridge {
 
     if (command.action === "list") {
       await this.refreshThreadList(project, projectRoot);
-      const rows = database
-        .listProjectThreads(project.id, {
-          includeArchived: command.mode !== "current",
-          ...(command.mode === "archived" ? {} : { limit: 50 }),
-        })
+      const indexedRows = database.listProjectThreads(project.id, {
+        includeArchived: command.mode !== "current",
+        ...(command.mode === "archived" ? {} : { limit: 50 }),
+      });
+      for (const row of indexedRows.filter((candidate) => this.isUnusableEmptyThread(candidate))) {
+        database.clearThreadBindingsForThread(project.id, row.threadId);
+        database.deleteFeishuThreadRoute(row.threadId);
+      }
+      const rows = indexedRows
+        .filter((row) => !this.isUnusableEmptyThread(row))
         .filter((row) =>
           command.mode === "archived"
             ? row.archived
@@ -1569,7 +1589,7 @@ export class Bridge {
     if (command.action === "show") {
       this.assertNotStopping();
       const details = await codex.readThreadDetails(record.threadId, true);
-      this.validateThreadProject(details, projectRoot);
+      await this.validateThreadProject(details, projectRoot);
       this.indexThread(project.id, details, record.archived);
       this.reply(chatId, this.renderThreadDetails(record, details));
       return;
@@ -1638,7 +1658,7 @@ export class Bridge {
     const restored = restoredResult.cwd
       ? restoredResult
       : await codex.readThread(restoredResult.id);
-    this.validateThreadProject(restored, projectRoot);
+    await this.validateThreadProject(restored, projectRoot);
     const restoredRecord = this.indexThread(project.id, restored, false);
     this.reply(
       chatId,
@@ -1658,7 +1678,7 @@ export class Bridge {
     ];
     for (const result of await Promise.all(requests)) {
       for (const summary of result.threads) {
-        if (summary.cwd && this.samePath(summary.cwd, projectRoot)) {
+        if (await this.threadBelongsToProject(summary, projectRoot)) {
           this.indexThread(project.id, summary, result.archived);
         }
       }
@@ -1699,7 +1719,7 @@ export class Bridge {
       if (!record) throw new Error("没有找到该对话。", { cause: error });
       throw error;
     }
-    this.validateThreadProject(summary, projectRoot);
+    await this.validateThreadProject(summary, projectRoot);
     record = this.indexThread(project.id, summary, record?.archived ?? false);
     if (!includeArchived && record.archived) throw new Error("该对话已归档。");
     return { record, summary };
@@ -1758,10 +1778,34 @@ export class Bridge {
     return project;
   }
 
-  private validateThreadProject(thread: CodexThreadSummary, projectRoot: string): void {
-    if (!thread.cwd || !this.samePath(thread.cwd, projectRoot)) {
+  private async validateThreadProject(
+    thread: CodexThreadSummary,
+    projectRoot: string,
+  ): Promise<void> {
+    if (!(await this.threadBelongsToProject(thread, projectRoot))) {
       throw new Error("该对话不属于当前项目。");
     }
+  }
+
+  private async threadBelongsToProject(
+    thread: CodexThreadSummary,
+    projectRoot: string,
+  ): Promise<boolean> {
+    if (!thread.cwd) return false;
+    if (this.samePath(thread.cwd, projectRoot)) return true;
+    try {
+      return await areSameResolvedPath(thread.cwd, projectRoot);
+    } catch {
+      return false;
+    }
+  }
+
+  private isUnusableEmptyThread(thread: ThreadIndexRecord): boolean {
+    return (
+      (thread.status === "failed" || thread.status === "unavailable") &&
+      !thread.title?.trim() &&
+      !thread.preview?.trim()
+    );
   }
 
   private assertNoOpenTask(chatId: string, action: string): void {
@@ -2211,5 +2255,15 @@ export class Bridge {
     return /(?:thread|conversation|对话).*(?:not found|does not exist|missing|不存在)|(?:not found|does not exist).*(?:thread|conversation)/i.test(
       messages.join(" "),
     );
+  }
+
+  private isMissingRolloutError(error: unknown): boolean {
+    const messages: string[] = [];
+    let current: unknown = error;
+    while (current instanceof Error) {
+      messages.push(current.message);
+      current = current.cause;
+    }
+    return /no rollout found for thread id/i.test(messages.join(" "));
   }
 }

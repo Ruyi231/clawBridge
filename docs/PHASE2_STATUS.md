@@ -142,4 +142,10 @@
 
 2026-08-13 发布验证：`npm run check`、`npm run build`、`npm run format:check` 全部通过；全量 Vitest 为 18 个测试文件、193 项测试全部通过。全新临时数据库和现用数据库的只读备份副本均成功迁移到 v10，副本中的 17 个项目及 11 条任务历史保留。受管脚本随后优雅停止旧实例、构建并部署私有运行副本；运行态只读核验确认版本为 `2.0.0`、状态 healthy、凭据已配置、登录自启动已安装、`approvalPolicy: onRequest`、17/17 个 Desktop 项目同步成功且 stderr 为空。
 
+### v2.0.1 对话发现补丁
+
+- Codex Desktop 历史对话的 `cwd` 可能仍保存迁移前路径；项目对话同步现在比较两侧 `realpath`，因此指向当前项目目录的 Junction/符号链接不再被误判为其他项目。
+- 对于仅执行 `thread/start`、尚未产生 rollout 就被 App Server 释放的空对话，Codex 会返回 `no rollout found for thread id`。Bridge 现在会将该索引标为不可用、清除所有活动绑定和飞书话题路由，并从卡片与文本对话列表隐藏，避免继续选择后重复失败。
+- 2026-08-13 验证：`npm run check`、`npm run format:check`、`npm run build` 通过；全量 Vitest 为 18 个测试文件、196 项测试全部通过。受管实例已优雅重启到 `2.0.1`，状态 healthy，17/17 个 Codex Desktop 项目同步成功。
+
 上述运行态验证证明 2.0 已被本机进程加载，但没有替代“尚待现场验证”中的手机操作。尤其是项目群、CardKit 增量、表单、远程审批/提问和附件下载仍需使用无敏感数据的测试项目完成真实飞书 E2E。

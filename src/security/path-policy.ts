@@ -22,6 +22,16 @@ export async function resolveProjectPath(rootPath: string, requestedPath = "."):
   return realCandidate;
 }
 
+export async function areSameResolvedPath(left: string, right: string): Promise<boolean> {
+  const [resolvedLeft, resolvedRight] = await Promise.all([
+    realpath(path.resolve(left)),
+    realpath(path.resolve(right)),
+  ]);
+  return process.platform === "win32"
+    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+    : resolvedLeft === resolvedRight;
+}
+
 export function isPathLexicallyWithin(rootPath: string, requestedPath: string): boolean {
   return isWithin(path.resolve(rootPath), path.resolve(rootPath, requestedPath));
 }

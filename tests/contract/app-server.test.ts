@@ -9,7 +9,7 @@ describe("Codex App Server JSONL contract", () => {
   it("identifies the released ClawBridge 2.0 client during initialization", async () => {
     client = new CodexAppServerClient({
       command: process.execPath,
-      args: [path.resolve("tests/fixtures/fake-app-server.mjs"), "--require-client-version=2.0.0"],
+      args: [path.resolve("tests/fixtures/fake-app-server.mjs"), "--require-client-version=2.0.1"],
       requestTimeoutMs: 2_000,
       turnTimeoutMs: 2_000,
     });

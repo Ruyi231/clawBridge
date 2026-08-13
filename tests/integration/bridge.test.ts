@@ -1,6 +1,6 @@
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ChannelAdapter } from "../../src/channels/channel-adapter.js";
@@ -535,6 +535,55 @@ describe("Bridge vertical slice", () => {
     );
   });
 
+  it("invalidates an empty topic thread when Codex reports that no rollout exists", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    vi.mocked(codex.runTurn).mockRejectedValue(
+      new Error("no rollout found for thread id thread-empty"),
+    );
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.upsertThread({ threadId: "thread-empty", projectId: "demo", status: "idle" });
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-group",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    database.bindFeishuThreadRoute({
+      threadId: "thread-empty",
+      projectId: "demo",
+      chatId: "chat-group",
+      topicRootId: "topic-empty",
+      ownerOpenId: "owner",
+    });
+    database.selectProject("chat-group", "demo");
+    database.setThread("chat-group", "demo", "thread-empty");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receiveGroup("run this", "missing-rollout", { topicRootId: "topic-empty" });
+
+    await vi.waitFor(() =>
+      expect(database.getProjectThread("demo", "thread-empty")?.status).toBe("unavailable"),
+    );
+    expect(database.getConversation("chat-group")?.threadId).toBeNull();
+    expect(database.getFeishuThreadRoute("thread-empty")).toBeUndefined();
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("没有可恢复的 Codex 历史"))).toBe(
+        true,
+      ),
+    );
+  });
+
   it("rejects group messages outside a registered project topic", async () => {
     const channel = new FakeChannel();
     const codex = fakeCodex();
@@ -867,6 +916,70 @@ describe("Bridge vertical slice", () => {
       expect(database.getConversation("chat-owner")?.threadId).toBe("thread-existing"),
     );
     expect(codex.readThread).toHaveBeenCalledWith("thread-existing");
+  });
+
+  it("discovers a Desktop thread whose historical cwd resolves to the current project", async () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-thread-alias-"));
+    const projectRoot = path.join(temporaryDirectory, "current-project");
+    const historicalRoot = path.join(temporaryDirectory, "historical-project");
+    mkdirSync(projectRoot);
+    symlinkSync(projectRoot, historicalRoot, process.platform === "win32" ? "junction" : "dir");
+    try {
+      const channel = new FakeChannel();
+      const codex = fakeCodex();
+      vi.mocked(codex.listThreads).mockImplementation(async (input) =>
+        input.archived
+          ? []
+          : [
+              {
+                id: "thread-migrated",
+                name: "Desktop migrated thread",
+                preview: "Existing Desktop work",
+                cwd: historicalRoot,
+                updatedAt: Date.now(),
+                status: "notLoaded",
+              },
+            ],
+      );
+      const database = new BridgeDatabase(":memory:");
+      bridge = new Bridge({
+        channel,
+        codex,
+        database,
+        config,
+        projects: [{ id: "demo", name: "Demo", rootPath: projectRoot, enabled: true }],
+        allowedOpenId: "owner",
+        logger: pino({ level: "silent" }),
+      });
+      await bridge.start();
+      database.selectProject("chat-owner", "demo");
+      await channel.receive("/menu", "migrated-thread-menu");
+      await vi.waitFor(() =>
+        expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+      );
+
+      await channel.receiveCard(
+        { version: 1, action: "thread.list", projectId: "demo" },
+        "migrated-thread-list",
+      );
+
+      await vi.waitFor(() =>
+        expect(database.getProjectThread("demo", "thread-migrated")?.title).toBe(
+          "Desktop migrated thread",
+        ),
+      );
+      expect(
+        channel.sent.some(
+          (message) =>
+            message.kind === "card" &&
+            JSON.stringify(message.card).includes("Desktop migrated thread"),
+        ),
+      ).toBe(true);
+    } finally {
+      await bridge?.stop();
+      bridge = undefined;
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
   });
 
   it("selects a model and reasoning effort for the current thread", async () => {
