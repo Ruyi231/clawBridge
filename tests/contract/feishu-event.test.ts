@@ -63,6 +63,30 @@ describe("Feishu message contract", () => {
       text: "hello from sdk",
     });
   });
+
+  it("preserves Feishu topic routing fields for group messages", () => {
+    expect(
+      parseFeishuMessage({
+        event_id: "evt-topic-1",
+        sender: { sender_id: { open_id: "ou-owner" } },
+        message: {
+          message_id: "om-reply-1",
+          root_id: "om-topic-root-1",
+          parent_id: "om-topic-root-1",
+          thread_id: "omt-thread-1",
+          chat_id: "oc-project-1",
+          chat_type: "group",
+          message_type: "text",
+          content: JSON.stringify({ text: "continue this task" }),
+        },
+      }),
+    ).toMatchObject({
+      chatType: "group",
+      chatId: "oc-project-1",
+      topicRootId: "om-topic-root-1",
+      feishuThreadId: "omt-thread-1",
+    });
+  });
 });
 
 describe("Feishu card action contract", () => {

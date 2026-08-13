@@ -28,6 +28,7 @@ describe("parseCardAction", () => {
       { version: 1, action: "project.list" },
       { version: 1, action: "project.list", page: 1_000 },
       { version: 1, action: "project.use", projectId: "desktop@abc-123" },
+      { version: 1, action: "project.space", projectId: "claw" },
       { version: 1, action: "thread.list", projectId: "claw" },
       { version: 1, action: "thread.list", projectId: "claw", page: 7 },
       { version: 1, action: "thread.use", projectId: "claw", threadId: "019f-aa" },
@@ -74,24 +75,26 @@ describe("Feishu card rendering", () => {
     expect(actions(card).map((item) => item.action)).toEqual([
       "project.list",
       "thread.list",
+      "project.space",
       "thread.new",
       "menu.refresh",
-      "task.stop",
       "chat.close",
+      "task.stop",
     ]);
     const actionRows = card.elements.filter((element) => element.tag === "action");
-    expect(actionRows).toHaveLength(3);
-    expect(actionRows.map((row) => row.layout)).toEqual(["bisected", "bisected", "bisected"]);
+    expect(actionRows).toHaveLength(4);
+    expect(actionRows.map((row) => row.layout)).toEqual([
+      "bisected",
+      "bisected",
+      "bisected",
+      "flow",
+    ]);
     expect(
       actionRows.map((row) =>
         (row.actions as Array<{ text: { content: string } }>).map((item) => item.text.content),
       ),
-    ).toEqual([
-      ["选择项目", "选择对话"],
-      ["新对话", "刷新"],
-      ["停止任务", "交还桌面"],
-    ]);
-    expect(actionRows.every((row) => (row.actions as unknown[]).length === 2)).toBe(true);
+    ).toEqual([["选择项目", "选择对话"], ["项目群", "新对话"], ["刷新", "交还桌面"], ["停止任务"]]);
+    expect(actionRows.every((row) => (row.actions as unknown[]).length <= 2)).toBe(true);
     const summary = card.elements[0] as { text: { content: string } };
     expect(summary.text.content).toContain("修复 \\*卡片\\* \\[测试\\]");
     expect(JSON.stringify(card)).not.toContain("D:\\");

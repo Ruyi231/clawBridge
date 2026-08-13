@@ -144,6 +144,26 @@ describe("task persistence", () => {
     });
   });
 
+  it("persists a topic reply target in text deliveries", () => {
+    const queued = database.queueOutbound({
+      chatId: "chat-project",
+      kind: "text",
+      text: "任务完成",
+      replyToMessageId: "topic-root-1",
+    });
+
+    expect(queued).toMatchObject({
+      kind: "text",
+      payload: { text: "任务完成", replyToMessageId: "topic-root-1" },
+      message: {
+        chatId: "chat-project",
+        kind: "text",
+        text: "任务完成",
+        replyToMessageId: "topic-root-1",
+      },
+    });
+  });
+
   it("proves card callbacks came from a sent Bridge card in the same chat", () => {
     const card = { schema: "2.0", body: { elements: [] } };
     const sentCard = database.queueOutbound({
@@ -245,6 +265,61 @@ describe("task persistence", () => {
 });
 
 describe("project and thread persistence", () => {
+  it("binds each project to one Feishu workspace and each thread to one topic", () => {
+    const database = new BridgeDatabase(":memory:");
+    try {
+      database.syncProjects([
+        { id: "demo", name: "Demo", rootPath: "D:/demo", enabled: true },
+        { id: "other", name: "Other", rootPath: "D:/other", enabled: true },
+      ]);
+      database.upsertThread({ threadId: "thread-1", projectId: "demo" });
+      database.upsertThread({ threadId: "thread-2", projectId: "demo" });
+
+      expect(
+        database.bindFeishuProjectSpace({
+          projectId: "demo",
+          chatId: "oc_demo",
+          ownerOpenId: "ou_owner",
+          displayName: "[Codex] Demo",
+        }),
+      ).toMatchObject({ projectId: "demo", chatId: "oc_demo", ownerOpenId: "ou_owner" });
+      expect(database.getFeishuProjectSpaceByChat("oc_demo")?.projectId).toBe("demo");
+
+      const route = database.bindFeishuThreadRoute({
+        projectId: "demo",
+        threadId: "thread-1",
+        chatId: "oc_demo",
+        topicRootId: "omt_topic_1",
+        ownerOpenId: "ou_owner",
+      });
+      expect(route).toMatchObject({ threadId: "thread-1", topicRootId: "omt_topic_1" });
+      expect(database.resolveFeishuThreadRoute("oc_demo", "omt_topic_1")?.threadId).toBe(
+        "thread-1",
+      );
+      expect(database.listFeishuThreadRoutes("demo")).toHaveLength(1);
+
+      expect(() =>
+        database.bindFeishuProjectSpace({
+          projectId: "other",
+          chatId: "oc_demo",
+          ownerOpenId: "ou_owner",
+          displayName: "[Codex] Other",
+        }),
+      ).toThrow(/already bound/);
+      expect(() =>
+        database.bindFeishuThreadRoute({
+          projectId: "demo",
+          threadId: "thread-2",
+          chatId: "oc_demo",
+          topicRootId: "omt_topic_1",
+          ownerOpenId: "ou_owner",
+        }),
+      ).toThrow(/already bound/);
+    } finally {
+      database.close();
+    }
+  });
+
   it("uses configured projects only as bootstrap data", () => {
     database.setProjectEnabled("demo", false);
     database.syncProjects([{ id: "demo", name: "Changed", rootPath: "D:/changed", enabled: true }]);

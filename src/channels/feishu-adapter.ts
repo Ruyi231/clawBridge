@@ -159,18 +159,95 @@ export class FeishuAdapter implements ChannelAdapter {
 
   async send(message: OutboundMessage): Promise<string> {
     const isCard = message.kind === "card";
-    const response = await this.client.im.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: {
-        receive_id: message.chatId,
-        msg_type: isCard ? "interactive" : "text",
-        content: JSON.stringify(isCard ? message.card : { text: message.text }),
-      },
-    });
+    const content = JSON.stringify(isCard ? message.card : { text: message.text });
+    const response =
+      !isCard && message.replyToMessageId
+        ? await this.client.im.message.reply({
+            path: { message_id: message.replyToMessageId },
+            data: { msg_type: "text", content, reply_in_thread: true },
+          })
+        : await this.client.im.message.create({
+            params: { receive_id_type: "chat_id" },
+            data: {
+              receive_id: message.chatId,
+              msg_type: isCard ? "interactive" : "text",
+              content,
+            },
+          });
     if (response.code !== 0)
       throw new Error(`Feishu send failed: ${response.msg ?? response.code}`);
     const messageId = response.data?.message_id;
     if (!messageId) throw new Error("Feishu send failed: response is missing message_id");
     return messageId;
+  }
+
+  async createProjectSpace(input: {
+    projectId: string;
+    projectName: string;
+    ownerOpenId: string;
+    idempotencyKey: string;
+  }): Promise<{ chatId: string; displayName: string }> {
+    const safeName = input.projectName
+      .replace(/[\r\n\t]/g, " ")
+      .trim()
+      .slice(0, 48);
+    if (!safeName) throw new Error("Feishu project space name cannot be empty");
+    const displayName = `[Codex] ${safeName}`.slice(0, 60);
+    const response = await this.client.im.chat.create({
+      params: {
+        user_id_type: "open_id",
+        set_bot_manager: true,
+        uuid: input.idempotencyKey.slice(0, 50),
+      },
+      data: {
+        name: displayName,
+        description: `ClawBridge project workspace: ${input.projectId}`.slice(0, 100),
+        owner_id: input.ownerOpenId,
+        user_id_list: [input.ownerOpenId],
+        group_message_type: "thread",
+        chat_mode: "group",
+        chat_type: "private",
+        join_message_visibility: "not_anyone",
+        leave_message_visibility: "not_anyone",
+        membership_approval: "approval_required",
+      },
+    });
+    if (response.code !== 0) {
+      throw new Error(`Feishu create project space failed: ${response.msg ?? response.code}`);
+    }
+    const chatId = response.data?.chat_id;
+    if (!chatId) {
+      throw new Error("Feishu create project space failed: response is missing chat_id");
+    }
+    return { chatId, displayName };
+  }
+
+  async createProjectTopic(input: {
+    chatId: string;
+    title: string;
+    idempotencyKey: string;
+  }): Promise<{ topicRootId: string }> {
+    const title = input.title
+      .replace(/[\r\n\t]/g, " ")
+      .trim()
+      .slice(0, 120);
+    if (!title) throw new Error("Feishu project topic title cannot be empty");
+    const response = await this.client.im.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: input.chatId,
+        msg_type: "text",
+        content: JSON.stringify({ text: `🧵 ${title}` }),
+        uuid: input.idempotencyKey.slice(0, 50),
+      },
+    });
+    if (response.code !== 0) {
+      throw new Error(`Feishu create project topic failed: ${response.msg ?? response.code}`);
+    }
+    const topicRootId = response.data?.message_id;
+    if (!topicRootId) {
+      throw new Error("Feishu create project topic failed: response is missing message_id");
+    }
+    return { topicRootId };
   }
 }

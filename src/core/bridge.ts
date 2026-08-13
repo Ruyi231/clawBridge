@@ -170,10 +170,28 @@ export class Bridge {
         }
         authorizeMessage(event, { allowedOpenId, directMessagesOnly: false });
       } else {
-        authorizeMessage(event, {
-          allowedOpenId,
-          directMessagesOnly: config.feishu.directMessagesOnly,
-        });
+        if (event.chatType === "group") {
+          authorizeMessage(event, { allowedOpenId, directMessagesOnly: false });
+          const space = database.getFeishuProjectSpaceByChat(event.chatId);
+          if (!space || space.ownerOpenId !== event.senderOpenId) {
+            throw new BridgeError("UNAUTHORIZED", "Group workspace is not registered");
+          }
+          if (!event.topicRootId) {
+            throw new BridgeError(
+              "GROUP_DISABLED",
+              "Send Codex tasks inside a registered project topic",
+            );
+          }
+          const route = database.resolveFeishuThreadRoute(event.chatId, event.topicRootId);
+          if (!route || route.ownerOpenId !== event.senderOpenId) {
+            throw new BridgeError("UNAUTHORIZED", "Project topic is not registered");
+          }
+        } else {
+          authorizeMessage(event, {
+            allowedOpenId,
+            directMessagesOnly: config.feishu.directMessagesOnly,
+          });
+        }
       }
       if (!database.recordInboundEvent(event)) {
         logger.info({ eventId: event.eventId }, "Ignored duplicate event");
@@ -237,6 +255,15 @@ export class Bridge {
 
   private async processMessage(message: InboundMessage): Promise<void> {
     if (this.stopping) return;
+    if (message.chatType === "group") {
+      const route = this.dependencies.database.resolveFeishuThreadRoute(
+        message.chatId,
+        message.topicRootId!,
+      );
+      if (!route) throw new Error("项目话题尚未绑定 Codex 对话");
+      this.dependencies.database.selectProject(message.chatId, route.projectId);
+      this.dependencies.database.setThread(message.chatId, route.projectId, route.threadId);
+    }
     const command = parseCommand(message.text);
     const requestsCardMenu =
       (command?.group === "control" && command.action === "menu") ||
@@ -250,6 +277,13 @@ export class Bridge {
       return;
     }
     if (command) {
+      if (message.chatType === "group") {
+        this.reply(
+          message.chatId,
+          "项目话题中请直接发送任务；项目、对话和系统管理请在机器人单聊控制台操作。",
+        );
+        return;
+      }
       await this.executeCommand(message, command);
       return;
     }
@@ -298,7 +332,7 @@ export class Bridge {
       logger.info({ eventId: message.eventId }, "Ignored duplicate event");
       return;
     }
-    this.reply(message.chatId, `📋 已入队：${task.id}`, task.id);
+    this.reply(message.chatId, `📋 已入队：${task.id}`, task.id, task.replyToMessageId);
     void this.drainQueue();
   }
 
@@ -349,6 +383,7 @@ export class Bridge {
               : task.projectId),
         }),
         task.id,
+        task.replyToMessageId,
       );
       return;
     }
@@ -368,6 +403,7 @@ export class Bridge {
           threadId,
         }),
         task.id,
+        task.replyToMessageId,
       );
       return;
     }
@@ -422,6 +458,7 @@ export class Bridge {
           threadId: result.threadId,
         }),
         task.id,
+        task.replyToMessageId,
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -445,6 +482,7 @@ export class Bridge {
             threadId: activeThreadId,
           }),
           task.id,
+          task.replyToMessageId,
         );
       } else {
         logger.error({ err: error, taskId: task.id }, "Task failed");
@@ -458,6 +496,7 @@ export class Bridge {
             threadId: activeThreadId,
           }),
           task.id,
+          task.replyToMessageId,
         );
       }
     } finally {
@@ -472,6 +511,8 @@ export class Bridge {
           this.reply(
             task.chatId,
             "⚠️ 任务已经结束，但 Codex 会话自动释放失败。请在没有其他任务运行时执行 /chat close，再到 Codex Desktop 打开该对话。",
+            undefined,
+            task.replyToMessageId,
           );
         }
       }
@@ -530,6 +571,9 @@ export class Bridge {
         });
         await this.showHomeCard(event.chatId, "项目已切换");
         return;
+      case "project.space":
+        await this.openProjectSpace(event.chatId, event.senderOpenId, action.projectId);
+        return;
       case "thread.list":
         await this.ensureCardProjectSelected(event.chatId, action.projectId);
         await this.showThreadCard(event.chatId, action.projectId, action.page ?? 0);
@@ -548,9 +592,9 @@ export class Bridge {
         await this.runChatCommand(event.chatId, {
           group: "chat",
           action: "new",
-          lazy: true,
+          lazy: false,
         });
-        await this.showHomeCard(event.chatId, "已准备新对话，直接发送任务即可");
+        await this.openProjectSpace(event.chatId, event.senderOpenId, action.projectId);
         return;
       case "thread.show":
         await this.ensureCardProjectSelected(event.chatId, action.projectId);
@@ -578,6 +622,66 @@ export class Bridge {
       projectId,
       clearThread: false,
     });
+  }
+
+  private async openProjectSpace(
+    controlChatId: string,
+    ownerOpenId: string,
+    projectId: string,
+  ): Promise<void> {
+    const { channel, database } = this.dependencies;
+    const project = database.getProject(projectId);
+    if (!project?.enabled || !this.isDesktopProjectAuthorized(project)) {
+      throw new Error("项目不存在或已停用，请刷新项目列表。");
+    }
+    let space = database.getFeishuProjectSpace(projectId);
+    if (!space) {
+      if (!channel.createProjectSpace) throw new Error("当前消息通道不支持创建项目群。");
+      const created = await channel.createProjectSpace({
+        projectId,
+        projectName: project.name,
+        ownerOpenId,
+        idempotencyKey: `clawbridge-project-${projectId}`,
+      });
+      space = database.bindFeishuProjectSpace({
+        projectId,
+        chatId: created.chatId,
+        ownerOpenId,
+        displayName: created.displayName,
+      });
+    }
+
+    const selected = database.getConversation(controlChatId);
+    const thread =
+      selected?.projectId === projectId && selected.threadId
+        ? database.getProjectThread(projectId, selected.threadId)
+        : undefined;
+    if (thread && !database.getFeishuThreadRoute(thread.threadId)) {
+      if (!channel.createProjectTopic) throw new Error("当前消息通道不支持创建项目话题。");
+      const created = await channel.createProjectTopic({
+        chatId: space.chatId,
+        title: thread.title || `对话 #${thread.localNumber}`,
+        idempotencyKey: `clawbridge-thread-${thread.threadId}`,
+      });
+      database.bindFeishuThreadRoute({
+        threadId: thread.threadId,
+        projectId,
+        chatId: space.chatId,
+        topicRootId: created.topicRootId,
+        ownerOpenId,
+      });
+      await this.showHomeCard(
+        controlChatId,
+        `项目群已就绪，对话 #${thread.localNumber} 已建立话题`,
+      );
+      return;
+    }
+    await this.showHomeCard(
+      controlChatId,
+      thread
+        ? "项目群和当前对话话题已经存在"
+        : "项目群已创建；选择一个对话后再次点击“项目群”建立话题",
+    );
   }
 
   private async showHomeCard(chatId: string, notice?: string): Promise<void> {
@@ -1376,15 +1480,23 @@ export class Bridge {
     }
   }
 
-  private reply(chatId: string, text: string, taskId?: string): void {
+  private reply(
+    chatId: string,
+    text: string,
+    taskId?: string,
+    replyToMessageId?: string | null,
+  ): void {
     const chunks = splitMessage(text);
     chunks.forEach((body, sequence) =>
-      this.dependencies.database.queueDelivery({
-        chatId,
-        body,
-        sequence,
-        ...(taskId ? { taskId } : {}),
-      }),
+      this.dependencies.database.queueOutbound(
+        {
+          chatId,
+          kind: "text",
+          text: body,
+          ...(replyToMessageId ? { replyToMessageId } : {}),
+        },
+        { sequence, ...(taskId ? { taskId } : {}) },
+      ),
     );
     void this.drainDeliveries();
   }

@@ -3,6 +3,9 @@ import type { InboundCardAction, InboundMessage } from "../core/types.js";
 
 const messageSchema = z.object({
   message_id: z.string().min(1),
+  root_id: z.string().min(1).optional(),
+  parent_id: z.string().min(1).optional(),
+  thread_id: z.string().min(1).optional(),
   chat_id: z.string().min(1),
   chat_type: z.enum(["p2p", "group"]),
   message_type: z.string(),
@@ -83,6 +86,10 @@ export function parseFeishuMessage(payload: unknown): InboundMessage | null {
     messageId: message.message_id,
     chatId: message.chat_id,
     chatType: message.chat_type,
+    ...(message.root_id || message.thread_id
+      ? { topicRootId: message.root_id ?? message.thread_id }
+      : {}),
+    ...(message.thread_id ? { feishuThreadId: message.thread_id } : {}),
     senderOpenId: sender.sender_id.open_id,
     text: content.text.trim(),
     receivedAt: timestamp ? new Date(Number(timestamp)).toISOString() : new Date().toISOString(),

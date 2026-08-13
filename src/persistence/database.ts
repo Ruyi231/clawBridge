@@ -68,6 +68,30 @@ CREATE TABLE IF NOT EXISTS thread_index (
 CREATE INDEX IF NOT EXISTS idx_thread_index_project_updated
 ON thread_index(project_id, archived, updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS feishu_project_spaces (
+  project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
+  chat_id TEXT NOT NULL UNIQUE,
+  owner_open_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS feishu_thread_routes (
+  thread_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(project_id),
+  chat_id TEXT NOT NULL,
+  topic_root_id TEXT NOT NULL,
+  owner_open_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(chat_id, topic_root_id),
+  FOREIGN KEY(project_id) REFERENCES feishu_project_spaces(project_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_feishu_thread_routes_project
+ON feishu_thread_routes(project_id, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS tasks (
   task_id TEXT PRIMARY KEY,
   event_id TEXT NOT NULL UNIQUE,
@@ -77,6 +101,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   prompt TEXT NOT NULL,
   state TEXT NOT NULL,
   thread_id TEXT,
+  reply_to_message_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   error TEXT
@@ -145,6 +170,25 @@ export interface ThreadIndexRecord {
   lastSyncedAt: string | null;
 }
 
+export interface FeishuProjectSpaceRecord {
+  projectId: string;
+  chatId: string;
+  ownerOpenId: string;
+  displayName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FeishuThreadRouteRecord {
+  threadId: string;
+  projectId: string;
+  chatId: string;
+  topicRootId: string;
+  ownerOpenId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface ProjectRow {
   project_id: string;
   name: string;
@@ -172,6 +216,25 @@ interface ThreadIndexRow {
   last_synced_at: string | null;
 }
 
+interface FeishuProjectSpaceRow {
+  project_id: string;
+  chat_id: string;
+  owner_open_id: string;
+  display_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface FeishuThreadRouteRow {
+  thread_id: string;
+  project_id: string;
+  chat_id: string;
+  topic_root_id: string;
+  owner_open_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
 interface TaskRow {
   task_id: string;
   event_id: string;
@@ -180,6 +243,7 @@ interface TaskRow {
   prompt: string;
   state: TaskState;
   thread_id: string | null;
+  reply_to_message_id: string | null;
   created_at: string;
   updated_at: string;
   error: string | null;
@@ -211,6 +275,7 @@ function toTask(row: TaskRow): TaskRecord {
     prompt: row.prompt,
     state: row.state,
     threadId: row.thread_id,
+    replyToMessageId: row.reply_to_message_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     error: row.error,
@@ -232,11 +297,18 @@ function toDelivery(row: DeliveryRow): DeliveryRecord {
   };
   const payload = JSON.parse(row.payload) as unknown;
   if (row.kind === "text" && isRecord(payload) && typeof payload.text === "string") {
+    const replyToMessageId =
+      typeof payload.replyToMessageId === "string" ? payload.replyToMessageId : undefined;
     return {
       ...common,
       kind: "text",
-      payload: { text: payload.text },
-      message: { chatId: row.chat_id, kind: "text", text: payload.text },
+      payload: { text: payload.text, ...(replyToMessageId ? { replyToMessageId } : {}) },
+      message: {
+        chatId: row.chat_id,
+        kind: "text",
+        text: payload.text,
+        ...(replyToMessageId ? { replyToMessageId } : {}),
+      },
       body: row.body,
     };
   }
@@ -326,6 +398,10 @@ export class BridgeDatabase {
     this.migrateProjectState();
     this.migrateOutboundDeliveries();
     this.migrateDeliveryAudience();
+    this.database
+      .prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(6, ?)")
+      .run(new Date().toISOString());
+    this.migrateTaskReplyRouting();
   }
 
   close(): void {
@@ -842,6 +918,158 @@ export class BridgeDatabase {
     return row ? toThreadIndex(row) : undefined;
   }
 
+  bindFeishuProjectSpace(input: {
+    projectId: string;
+    chatId: string;
+    ownerOpenId: string;
+    displayName: string;
+  }): FeishuProjectSpaceRecord {
+    const project = this.getProject(input.projectId);
+    if (!project) throw new Error(`Unknown project "${input.projectId}"`);
+    const conflicting = this.database
+      .prepare("SELECT project_id FROM feishu_project_spaces WHERE chat_id = ?")
+      .get(input.chatId) as { project_id: string } | undefined;
+    if (conflicting && conflicting.project_id !== input.projectId) {
+      throw new Error(`Feishu chat is already bound to project "${conflicting.project_id}"`);
+    }
+    const now = new Date().toISOString();
+    this.database
+      .prepare(
+        `
+        INSERT INTO feishu_project_spaces(
+          project_id, chat_id, owner_open_id, display_name, created_at, updated_at
+        ) VALUES(?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id) DO UPDATE SET
+          chat_id=excluded.chat_id,
+          owner_open_id=excluded.owner_open_id,
+          display_name=excluded.display_name,
+          updated_at=excluded.updated_at
+      `,
+      )
+      .run(input.projectId, input.chatId, input.ownerOpenId, input.displayName, now, now);
+    return this.getFeishuProjectSpace(input.projectId)!;
+  }
+
+  getFeishuProjectSpace(projectId: string): FeishuProjectSpaceRecord | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM feishu_project_spaces WHERE project_id = ?")
+      .get(projectId) as FeishuProjectSpaceRow | undefined;
+    return row ? this.toFeishuProjectSpace(row) : undefined;
+  }
+
+  getFeishuProjectSpaceByChat(chatId: string): FeishuProjectSpaceRecord | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM feishu_project_spaces WHERE chat_id = ?")
+      .get(chatId) as FeishuProjectSpaceRow | undefined;
+    return row ? this.toFeishuProjectSpace(row) : undefined;
+  }
+
+  listFeishuProjectSpaces(): FeishuProjectSpaceRecord[] {
+    return (
+      this.database
+        .prepare("SELECT * FROM feishu_project_spaces ORDER BY updated_at DESC, project_id")
+        .all() as FeishuProjectSpaceRow[]
+    ).map((row) => this.toFeishuProjectSpace(row));
+  }
+
+  bindFeishuThreadRoute(input: {
+    threadId: string;
+    projectId: string;
+    chatId: string;
+    topicRootId: string;
+    ownerOpenId: string;
+  }): FeishuThreadRouteRecord {
+    const thread = this.getProjectThread(input.projectId, input.threadId);
+    if (!thread)
+      throw new Error(`Unknown thread "${input.threadId}" in project "${input.projectId}"`);
+    const space = this.getFeishuProjectSpace(input.projectId);
+    if (!space || space.chatId !== input.chatId) {
+      throw new Error("Thread route must use the project's registered Feishu chat");
+    }
+    if (space.ownerOpenId !== input.ownerOpenId) {
+      throw new Error("Thread route owner must match the project space owner");
+    }
+    const conflict = this.database
+      .prepare("SELECT thread_id FROM feishu_thread_routes WHERE chat_id = ? AND topic_root_id = ?")
+      .get(input.chatId, input.topicRootId) as { thread_id: string } | undefined;
+    if (conflict && conflict.thread_id !== input.threadId) {
+      throw new Error(`Feishu topic is already bound to thread "${conflict.thread_id}"`);
+    }
+    const now = new Date().toISOString();
+    this.database
+      .prepare(
+        `
+        INSERT INTO feishu_thread_routes(
+          thread_id, project_id, chat_id, topic_root_id, owner_open_id, created_at, updated_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(thread_id) DO UPDATE SET
+          project_id=excluded.project_id,
+          chat_id=excluded.chat_id,
+          topic_root_id=excluded.topic_root_id,
+          owner_open_id=excluded.owner_open_id,
+          updated_at=excluded.updated_at
+      `,
+      )
+      .run(
+        input.threadId,
+        input.projectId,
+        input.chatId,
+        input.topicRootId,
+        input.ownerOpenId,
+        now,
+        now,
+      );
+    return this.getFeishuThreadRoute(input.threadId)!;
+  }
+
+  getFeishuThreadRoute(threadId: string): FeishuThreadRouteRecord | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM feishu_thread_routes WHERE thread_id = ?")
+      .get(threadId) as FeishuThreadRouteRow | undefined;
+    return row ? this.toFeishuThreadRoute(row) : undefined;
+  }
+
+  resolveFeishuThreadRoute(
+    chatId: string,
+    topicRootId: string,
+  ): FeishuThreadRouteRecord | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM feishu_thread_routes WHERE chat_id = ? AND topic_root_id = ?")
+      .get(chatId, topicRootId) as FeishuThreadRouteRow | undefined;
+    return row ? this.toFeishuThreadRoute(row) : undefined;
+  }
+
+  listFeishuThreadRoutes(projectId: string): FeishuThreadRouteRecord[] {
+    return (
+      this.database
+        .prepare("SELECT * FROM feishu_thread_routes WHERE project_id = ? ORDER BY updated_at DESC")
+        .all(projectId) as FeishuThreadRouteRow[]
+    ).map((row) => this.toFeishuThreadRoute(row));
+  }
+
+  private toFeishuProjectSpace(row: FeishuProjectSpaceRow): FeishuProjectSpaceRecord {
+    return {
+      projectId: row.project_id,
+      chatId: row.chat_id,
+      ownerOpenId: row.owner_open_id,
+      displayName: row.display_name,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private toFeishuThreadRoute(row: FeishuThreadRouteRow): FeishuThreadRouteRecord {
+    return {
+      threadId: row.thread_id,
+      projectId: row.project_id,
+      chatId: row.chat_id,
+      topicRootId: row.topic_root_id,
+      ownerOpenId: row.owner_open_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
   enqueue(message: InboundMessage, projectId: string, threadId?: string | null): TaskRecord | null {
     const now = new Date().toISOString();
     const id = randomUUID();
@@ -850,8 +1078,8 @@ export class BridgeDatabase {
         `
       INSERT OR IGNORE INTO tasks(
         task_id, event_id, message_id, chat_id, project_id, prompt, state, thread_id,
-        created_at, updated_at
-      ) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+        reply_to_message_id, created_at, updated_at
+      ) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
     `,
       )
       .run(
@@ -862,6 +1090,7 @@ export class BridgeDatabase {
         projectId,
         message.text,
         threadId ?? null,
+        message.topicRootId ?? null,
         now,
         now,
       );
@@ -1024,7 +1253,12 @@ export class BridgeDatabase {
     const now = new Date().toISOString();
     const kind = message.kind === "card" ? "card" : "text";
     const payload =
-      message.kind === "card" ? { text: message.text, card: message.card } : { text: message.text };
+      message.kind === "card"
+        ? { text: message.text, card: message.card }
+        : {
+            text: message.text,
+            ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
+          };
     const body = message.text;
     this.database
       .prepare(
@@ -1406,5 +1640,21 @@ export class BridgeDatabase {
         .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(5, ?)")
         .run(now);
     })();
+  }
+
+  private migrateTaskReplyRouting(): void {
+    const applied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 7")
+      .get();
+    if (applied) return;
+    const columns = this.database.prepare("PRAGMA table_info(tasks)").all() as Array<{
+      name: string;
+    }>;
+    if (!columns.some((column) => column.name === "reply_to_message_id")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN reply_to_message_id TEXT");
+    }
+    this.database
+      .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(7, ?)")
+      .run(new Date().toISOString());
   }
 }

@@ -18,6 +18,11 @@ class FakeChannel implements ChannelAdapter {
   sendAttempts = 0;
   private remainingFailures: number;
   private releaseBlockedSend?: () => void;
+  readonly createProjectSpace = vi.fn(async (input: { projectName: string }) => ({
+    chatId: "chat-created-project",
+    displayName: `[Codex] ${input.projectName}`,
+  }));
+  readonly createProjectTopic = vi.fn(async () => ({ topicRootId: "topic-created-thread" }));
 
   constructor(options: { failures?: number; blockFirstSend?: boolean } = {}) {
     this.remainingFailures = options.failures ?? 0;
@@ -65,15 +70,20 @@ class FakeChannel implements ChannelAdapter {
     });
   }
 
-  async receiveGroup(text: string, eventId = "group-event-bridge-1"): Promise<void> {
+  async receiveGroup(
+    text: string,
+    eventId = "group-event-bridge-1",
+    options: { chatId?: string; topicRootId?: string; senderOpenId?: string } = {},
+  ): Promise<void> {
     if (!this.callback) throw new Error("channel has not started");
     await this.callback({
       eventId,
       messageId: "group-message-bridge-1",
-      chatId: "chat-group",
+      chatId: options.chatId ?? "chat-group",
       chatType: "group",
-      senderOpenId: "owner",
+      senderOpenId: options.senderOpenId ?? "owner",
       text,
+      ...(options.topicRootId ? { topicRootId: options.topicRootId } : {}),
       receivedAt: new Date().toISOString(),
     });
   }
@@ -245,6 +255,82 @@ describe("Bridge vertical slice", () => {
     expect(channel.sent.at(-1)?.text).toContain("thread-bridge");
   });
 
+  it("routes a registered project topic to its bound Codex thread", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.upsertThread({ threadId: "thread-topic", projectId: "demo", status: "idle" });
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-group",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    database.bindFeishuThreadRoute({
+      threadId: "thread-topic",
+      projectId: "demo",
+      chatId: "chat-group",
+      topicRootId: "topic-root-1",
+      ownerOpenId: "owner",
+    });
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receiveGroup("检查这个项目", "topic-task", {
+      topicRootId: "topic-root-1",
+    });
+
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
+    expect(codex.runTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: "检查这个项目",
+        cwd: process.cwd(),
+        threadId: "thread-topic",
+      }),
+    );
+  });
+
+  it("rejects group messages outside a registered project topic", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-group",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receiveGroup("不要执行", "group-without-topic");
+    await channel.receiveGroup("也不要执行", "unknown-topic", {
+      topicRootId: "unknown-topic-root",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(codex.runTurn).not.toHaveBeenCalled();
+    expect(database.nextQueued()).toBeUndefined();
+  });
+
   it("returns the interactive control card for /menu", async () => {
     const channel = new FakeChannel();
     bridge = new Bridge({
@@ -282,10 +368,26 @@ describe("Bridge vertical slice", () => {
 
   it("does not issue an interactive card into a group chat", async () => {
     const channel = new FakeChannel();
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.upsertThread({ threadId: "thread-topic", projectId: "demo", status: "idle" });
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-group",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    database.bindFeishuThreadRoute({
+      threadId: "thread-topic",
+      projectId: "demo",
+      chatId: "chat-group",
+      topicRootId: "topic-root-menu",
+      ownerOpenId: "owner",
+    });
     bridge = new Bridge({
       channel,
       codex: fakeCodex(),
-      database: new BridgeDatabase(":memory:"),
+      database,
       config: {
         ...config,
         feishu: { ...config.feishu, directMessagesOnly: false },
@@ -296,7 +398,7 @@ describe("Bridge vertical slice", () => {
     });
 
     await bridge.start();
-    await channel.receiveGroup("菜单", "group-menu");
+    await channel.receiveGroup("菜单", "group-menu", { topicRootId: "topic-root-menu" });
     await vi.waitFor(() =>
       expect(channel.sent.some((message) => message.text.includes("仅支持机器人单聊"))).toBe(true),
     );
@@ -349,7 +451,7 @@ describe("Bridge vertical slice", () => {
     }
   });
 
-  it("selects a project and prepares a fresh thread through card actions", async () => {
+  it("selects a project, creates a fresh thread, and opens its project topic", async () => {
     const channel = new FakeChannel();
     const codex = fakeCodex();
     const database = new BridgeDatabase(":memory:");
@@ -392,13 +494,26 @@ describe("Bridge vertical slice", () => {
       { version: 1, action: "thread.new", projectId: "demo" },
       "card-thread-new",
     );
-    await vi.waitFor(() => expect(database.getConversation("chat-owner")?.threadId).toBeNull());
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-owner")?.threadId).toBe("thread-created-1"),
+    );
+    expect(channel.createProjectSpace).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "demo", projectName: "Demo", ownerOpenId: "owner" }),
+    );
+    expect(channel.createProjectTopic).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: "chat-created-project" }),
+    );
+    expect(database.getFeishuThreadRoute("thread-created-1")).toMatchObject({
+      projectId: "demo",
+      chatId: "chat-created-project",
+      topicRootId: "topic-created-thread",
+    });
 
     await channel.receive("从新对话开始执行", "card-fresh-thread-task");
     await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
     expect(vi.mocked(codex.runTurn).mock.calls[0]?.[0]).toMatchObject({
       prompt: "从新对话开始执行",
-      threadId: null,
+      threadId: "thread-created-1",
     });
     await vi.waitFor(() =>
       expect(database.getConversation("chat-owner")?.threadId).toBe("thread-bridge"),

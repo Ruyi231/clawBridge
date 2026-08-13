@@ -35,6 +35,13 @@ const actionSchemas = [
   z
     .object({
       version: z.literal(CARD_VERSION),
+      action: z.literal("project.space"),
+      projectId: projectIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
       action: z.literal("thread.list"),
       projectId: projectIdSchema,
       page: cardPageSchema.optional(),
@@ -261,17 +268,30 @@ export function renderHomeCard(input: HomeCardInput): FeishuCard {
   if (input.project) {
     elements.push(
       actionRow([
+        button(
+          "项目群",
+          action({ version: CARD_VERSION, action: "project.space", projectId: input.project.id }),
+        ),
         button("新对话", projectScopedAction("thread.new", input.project.id)),
+      ]),
+      actionRow([
         button("刷新", action({ version: CARD_VERSION, action: "menu.refresh" })),
+        button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" })),
+      ]),
+    );
+    elements.push(
+      actionRow([
+        button("停止任务", action({ version: CARD_VERSION, action: "task.stop" }), "danger"),
+      ]),
+    );
+  } else {
+    elements.push(
+      actionRow([
+        button("停止任务", action({ version: CARD_VERSION, action: "task.stop" }), "danger"),
+        button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" })),
       ]),
     );
   }
-  elements.push(
-    actionRow([
-      button("停止任务", action({ version: CARD_VERSION, action: "task.stop" }), "danger"),
-      button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" })),
-    ]),
-  );
   return card("ClawBridge 控制台", elements);
 }
 

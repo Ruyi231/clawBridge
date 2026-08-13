@@ -12,6 +12,10 @@ export interface InboundMessage {
   messageId: string;
   chatId: string;
   chatType: "p2p" | "group";
+  /** Root message of a Feishu thread-style conversation, when present. */
+  topicRootId?: string | undefined;
+  /** Feishu's thread identifier, when supplied by the event. */
+  feishuThreadId?: string | undefined;
   senderOpenId: string;
   text: string;
   receivedAt: string;
@@ -40,6 +44,8 @@ export interface TaskRecord {
   prompt: string;
   state: TaskState;
   threadId: string | null;
+  /** Feishu root message to reply inside when the task originated from a project topic. */
+  replyToMessageId: string | null;
   createdAt: string;
   updatedAt: string;
   error: string | null;
@@ -50,6 +56,8 @@ export interface TextOutboundMessage {
   /** Omitted by legacy callers; normalized to `text` before persistence. */
   kind?: "text";
   text: string;
+  /** Reply to this Feishu message and keep the response inside its topic. */
+  replyToMessageId?: string | undefined;
 }
 
 export interface CardOutboundMessage {
@@ -82,7 +90,7 @@ export type DeliveryRecord = DeliveryRecordBase &
   (
     | {
         kind: "text";
-        payload: { text: string };
+        payload: { text: string; replyToMessageId?: string };
         message: TextOutboundMessage;
         /** @deprecated Use `message.text`. Retained for legacy delivery callers. */
         body: string;

@@ -204,4 +204,110 @@ describe("SQLite migration contract", () => {
       rmSync(temporaryDirectory, { recursive: true, force: true });
     }
   });
+
+  it("adds the version 6 Feishu workspace routing tables without changing projects", () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-routing-migration-"));
+    const databasePath = path.join(temporaryDirectory, "bridge.db");
+    let bridgeDatabase: BridgeDatabase | undefined;
+    try {
+      const legacy = new Database(databasePath);
+      legacy.exec(`
+        CREATE TABLE schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL
+        );
+        CREATE TABLE projects (
+          project_id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          root_path TEXT NOT NULL,
+          enabled INTEGER NOT NULL
+        );
+        INSERT INTO projects(project_id, name, root_path, enabled)
+        VALUES('demo', 'Demo', 'D:/demo', 1);
+      `);
+      legacy.close();
+
+      bridgeDatabase = new BridgeDatabase(databasePath);
+      expect(
+        bridgeDatabase.bindFeishuProjectSpace({
+          projectId: "demo",
+          chatId: "oc_demo",
+          ownerOpenId: "ou_owner",
+          displayName: "[Codex] Demo",
+        }).chatId,
+      ).toBe("oc_demo");
+      bridgeDatabase.close();
+      bridgeDatabase = undefined;
+
+      const migrated = new Database(databasePath, { readonly: true });
+      expect(
+        migrated.prepare("SELECT version FROM schema_migrations WHERE version = 6").get(),
+      ).toEqual({ version: 6 });
+      expect(migrated.prepare("SELECT name FROM projects WHERE project_id = 'demo'").get()).toEqual(
+        {
+          name: "Demo",
+        },
+      );
+      expect(
+        migrated
+          .prepare("SELECT chat_id FROM feishu_project_spaces WHERE project_id = 'demo'")
+          .get(),
+      ).toEqual({ chat_id: "oc_demo" });
+      migrated.close();
+    } finally {
+      bridgeDatabase?.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("adds version 7 task topic reply routing without changing queued tasks", () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-task-route-migration-"));
+    const databasePath = path.join(temporaryDirectory, "bridge.db");
+    let bridgeDatabase: BridgeDatabase | undefined;
+    try {
+      const legacy = new Database(databasePath);
+      legacy.exec(`
+        CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+        INSERT INTO schema_migrations(version, applied_at)
+        VALUES(1, '2026-08-11T00:00:00.000Z'), (2, '2026-08-11T00:00:00.000Z'),
+              (3, '2026-08-11T00:00:00.000Z'), (4, '2026-08-11T00:00:00.000Z'),
+              (5, '2026-08-11T00:00:00.000Z'), (6, '2026-08-11T00:00:00.000Z');
+        CREATE TABLE projects (
+          project_id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL, enabled INTEGER NOT NULL
+        );
+        INSERT INTO projects VALUES('demo', 'Demo', 'D:/demo', 1);
+        CREATE TABLE tasks (
+          task_id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, message_id TEXT NOT NULL,
+          chat_id TEXT NOT NULL, project_id TEXT NOT NULL, prompt TEXT NOT NULL, state TEXT NOT NULL,
+          thread_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error TEXT
+        );
+        INSERT INTO tasks VALUES(
+          'task-1', 'event-1', 'message-1', 'chat-1', 'demo', '继续任务', 'queued',
+          NULL, '2026-08-13T00:00:00.000Z', '2026-08-13T00:00:00.000Z', NULL
+        );
+      `);
+      legacy.close();
+
+      bridgeDatabase = new BridgeDatabase(databasePath);
+      expect(bridgeDatabase.nextQueued()).toMatchObject({
+        id: "task-1",
+        prompt: "继续任务",
+        replyToMessageId: null,
+      });
+      bridgeDatabase.close();
+      bridgeDatabase = undefined;
+
+      const migrated = new Database(databasePath, { readonly: true });
+      expect(
+        migrated.prepare("SELECT version FROM schema_migrations WHERE version = 7").get(),
+      ).toEqual({ version: 7 });
+      expect(
+        migrated.prepare("SELECT reply_to_message_id FROM tasks WHERE task_id = 'task-1'").get(),
+      ).toEqual({ reply_to_message_id: null });
+      migrated.close();
+    } finally {
+      bridgeDatabase?.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
 });

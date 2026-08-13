@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const larkMocks = vi.hoisted(() => ({
   createMessage: vi.fn(),
+  replyMessage: vi.fn(),
+  createChat: vi.fn(),
   wsStart: vi.fn(),
   wsClose: vi.fn(),
   handlers: {} as Record<string, (payload: unknown) => unknown>,
@@ -17,7 +19,10 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
     constructor(options: Record<string, unknown>) {
       larkMocks.clientOptions = options;
     }
-    readonly im = { message: { create: larkMocks.createMessage } };
+    readonly im = {
+      message: { create: larkMocks.createMessage, reply: larkMocks.replyMessage },
+      chat: { create: larkMocks.createChat },
+    };
   },
   WSClient: class {
     constructor(options: Record<string, unknown>) {
@@ -59,6 +64,14 @@ describe("Feishu adapter card contract", () => {
     larkMocks.createMessage.mockResolvedValue({
       code: 0,
       data: { message_id: "om-sent-1" },
+    });
+    larkMocks.replyMessage.mockResolvedValue({
+      code: 0,
+      data: { message_id: "om-reply-1" },
+    });
+    larkMocks.createChat.mockResolvedValue({
+      code: 0,
+      data: { chat_id: "oc-project-1" },
     });
     larkMocks.wsStart.mockImplementation(() => {
       (larkMocks.wsOptions.onReady as (() => void) | undefined)?.();
@@ -207,6 +220,30 @@ describe("Feishu adapter card contract", () => {
     });
   });
 
+  it("replies inside the originating project topic", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.send({
+        chatId: "oc-project",
+        text: "任务完成",
+        replyToMessageId: "om-topic-root",
+      }),
+    ).resolves.toBe("om-reply-1");
+    expect(larkMocks.replyMessage).toHaveBeenCalledWith({
+      path: { message_id: "om-topic-root" },
+      data: {
+        msg_type: "text",
+        content: JSON.stringify({ text: "任务完成" }),
+        reply_in_thread: true,
+      },
+    });
+    expect(larkMocks.createMessage).not.toHaveBeenCalled();
+  });
+
   it("rejects a successful API response without a message id", async () => {
     larkMocks.createMessage.mockResolvedValueOnce({ code: 0, data: {} });
     const adapter = new FeishuAdapter(
@@ -217,5 +254,81 @@ describe("Feishu adapter card contract", () => {
     await expect(adapter.send({ chatId: "oc-1", text: "hello" })).rejects.toThrow(
       "Feishu send failed: response is missing message_id",
     );
+  });
+
+  it("creates a private thread-style project workspace with the owner", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.createProjectSpace({
+        projectId: "demo",
+        projectName: "Demo Project",
+        ownerOpenId: "ou-owner",
+        idempotencyKey: "project-demo-123",
+      }),
+    ).resolves.toEqual({ chatId: "oc-project-1", displayName: "[Codex] Demo Project" });
+    expect(larkMocks.createChat).toHaveBeenCalledWith({
+      params: {
+        user_id_type: "open_id",
+        set_bot_manager: true,
+        uuid: "project-demo-123",
+      },
+      data: {
+        name: "[Codex] Demo Project",
+        description: "ClawBridge project workspace: demo",
+        owner_id: "ou-owner",
+        user_id_list: ["ou-owner"],
+        group_message_type: "thread",
+        chat_mode: "group",
+        chat_type: "private",
+        join_message_visibility: "not_anyone",
+        leave_message_visibility: "not_anyone",
+        membership_approval: "approval_required",
+      },
+    });
+  });
+
+  it("rejects a successful project workspace response without a chat id", async () => {
+    larkMocks.createChat.mockResolvedValueOnce({ code: 0, data: {} });
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.createProjectSpace({
+        projectId: "demo",
+        projectName: "Demo",
+        ownerOpenId: "ou-owner",
+        idempotencyKey: "project-demo-123",
+      }),
+    ).rejects.toThrow("response is missing chat_id");
+  });
+
+  it("creates a project topic root message with an idempotency key", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.createProjectTopic({
+        chatId: "oc-project-1",
+        title: "修复移动端布局",
+        idempotencyKey: "thread-019f",
+      }),
+    ).resolves.toEqual({ topicRootId: "om-sent-1" });
+    expect(larkMocks.createMessage).toHaveBeenCalledWith({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: "oc-project-1",
+        msg_type: "text",
+        content: JSON.stringify({ text: "🧵 修复移动端布局" }),
+        uuid: "thread-019f",
+      },
+    });
   });
 });
