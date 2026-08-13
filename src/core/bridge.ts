@@ -9,6 +9,7 @@ import {
   renderHomeCard,
   renderModelListCard,
   renderProjectCreateCard,
+  renderProjectSpaceCard,
   renderQuestionCard,
   renderProjectListCard,
   renderTaskCenterCard,
@@ -706,6 +707,23 @@ export class Bridge {
   private async processCardAction(event: InboundCardAction): Promise<void> {
     if (this.stopping) return;
     const action = parseCardAction(event.value);
+    const groupSpace = this.dependencies.database.getFeishuProjectSpaceByChat(event.chatId);
+    if (groupSpace) {
+      const actionProjectId = "projectId" in action ? action.projectId : undefined;
+      if (!actionProjectId || actionProjectId !== groupSpace.projectId) {
+        throw new BridgeError("UNAUTHORIZED", "项目群卡片只能操作当前项目");
+      }
+      if (
+        action.action === "project.list" ||
+        action.action === "project.use" ||
+        action.action === "project.create.show" ||
+        action.action === "project.create" ||
+        action.action === "menu.refresh" ||
+        action.action === "chat.close"
+      ) {
+        throw new BridgeError("UNAUTHORIZED", "该操作只能在机器人单聊控制台执行");
+      }
+    }
     if (this.codexClosing && action.action !== "chat.close" && action.action !== "menu.refresh") {
       throw new Error("Codex 会话正在释放，请稍后点击刷新。");
     }
@@ -756,7 +774,11 @@ export class Bridge {
           action: "use",
           reference: action.threadId,
         });
-        await this.showHomeCard(event.chatId, "对话已选择");
+        if (this.dependencies.database.getFeishuProjectSpaceByChat(event.chatId)) {
+          await this.openProjectSpace(event.chatId, event.senderOpenId, action.projectId);
+        } else {
+          await this.showHomeCard(event.chatId, "对话已选择");
+        }
         return;
       case "thread.new":
         await this.ensureCardProjectSelected(event.chatId, action.projectId);
@@ -1011,6 +1033,12 @@ export class Bridge {
           displayName: inspection.displayName,
         });
       }
+      if (inspection.messageMode === "thread" && channel.configureProjectSpace) {
+        await channel.configureProjectSpace({ chatId: space.chatId });
+        notice = notice
+          ? `${notice}；项目群已切换为“群内控制 + 对话话题”模式`
+          : "项目群已切换为“群内控制 + 对话话题”模式";
+      }
     }
     if (!space) {
       if (!channel.createProjectSpace) throw new Error("当前消息通道不支持创建项目群。");
@@ -1048,19 +1076,63 @@ export class Bridge {
         topicRootId: created.topicRootId,
         ownerOpenId,
       });
-      await this.showHomeCard(
-        controlChatId,
-        `${notice ? `${notice}；` : "项目群已就绪，"}对话 #${thread.localNumber} 已建立话题`,
+      database.selectProject(space.chatId, projectId);
+      database.setThread(space.chatId, projectId, thread.threadId);
+      this.showProjectSpaceCard(
+        space.chatId,
+        project,
+        thread,
+        `对话 #${thread.localNumber} 已建立话题`,
       );
+      if (controlChatId !== space.chatId) {
+        await this.showHomeCard(
+          controlChatId,
+          `${notice ? `${notice}；` : "项目群已就绪，"}对话 #${thread.localNumber} 已建立话题`,
+        );
+      }
       return;
     }
-    await this.showHomeCard(
-      controlChatId,
-      thread
-        ? (notice ?? "项目群和当前对话话题已经存在")
-        : notice
-          ? `${notice}；选择一个对话后再次点击“项目群”建立话题`
-          : "项目群已经存在；选择一个对话后再次点击“项目群”建立话题",
+    if (thread) {
+      database.selectProject(space.chatId, projectId);
+      database.setThread(space.chatId, projectId, thread.threadId);
+    }
+    this.showProjectSpaceCard(space.chatId, project, thread, notice);
+    if (controlChatId !== space.chatId) {
+      await this.showHomeCard(
+        controlChatId,
+        thread
+          ? (notice ?? "项目群和当前对话话题已经存在")
+          : notice
+            ? `${notice}；请在项目群中选择或新建对话`
+            : "项目群已经存在；请在项目群中选择或新建对话",
+      );
+    }
+  }
+
+  private showProjectSpaceCard(
+    chatId: string,
+    project: ProjectRecord,
+    thread?: ThreadIndexRecord,
+    notice?: string,
+  ): void {
+    this.replyCard(
+      chatId,
+      renderProjectSpaceCard({
+        project: { id: project.id, name: project.name },
+        thread: thread
+          ? {
+              id: thread.threadId,
+              projectId: thread.projectId,
+              localNumber: thread.localNumber,
+              title: thread.title,
+              preview: thread.preview,
+              status: thread.status,
+            }
+          : null,
+        ...(notice ? { notice } : {}),
+      }),
+      `${project.name} 项目控制台`,
+      "group",
     );
   }
 
@@ -1150,6 +1222,7 @@ export class Bridge {
         ...(project ? { project: { id: project.id, name: project.name } } : {}),
         page,
         totalPages,
+        projectSpace: Boolean(database.getFeishuProjectSpaceByChat(chatId)),
       }),
       project ? "项目任务中心" : "全局任务中心",
     );
@@ -1183,6 +1256,7 @@ export class Bridge {
         selectedModel: current?.model ?? defaultModel?.model ?? null,
         selectedReasoningEffort:
           current?.reasoningEffort ?? defaultModel?.defaultReasoningEffort ?? null,
+        projectSpace: Boolean(database.getFeishuProjectSpaceByChat(chatId)),
       }),
       "模型与推理强度",
     );
@@ -1254,6 +1328,7 @@ export class Bridge {
         selectedThreadId,
         page,
         totalPages,
+        projectSpace: Boolean(database.getFeishuProjectSpaceByChat(chatId)),
       }),
       `选择 ${project.name} 的对话`,
     );
@@ -2010,13 +2085,16 @@ export class Bridge {
     chatId: string,
     card: FeishuCard,
     fallbackText: string,
-    audience: "p2p" | "group" = "p2p",
+    audience?: "p2p" | "group",
     replyToMessageId?: string,
   ): void {
+    const resolvedAudience =
+      audience ??
+      (this.dependencies.database.getFeishuProjectSpaceByChat(chatId) ? "group" : "p2p");
     this.dependencies.database.queueOutbound({
       kind: "card",
       chatId,
-      audience,
+      audience: resolvedAudience,
       text: fallbackText,
       card: card as unknown as Record<string, unknown>,
       ...(replyToMessageId ? { replyToMessageId } : {}),

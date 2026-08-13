@@ -26,6 +26,7 @@ class FakeChannel implements ChannelAdapter {
     async () => ({ status: "ready", displayName: "[Codex] Demo" }),
   );
   readonly addProjectSpaceMember = vi.fn(async () => undefined);
+  readonly configureProjectSpace = vi.fn(async () => undefined);
   readonly createProjectTopic = vi.fn(async () => ({ topicRootId: "topic-created-thread" }));
   readonly startTaskStream = vi.fn(async () => ({
     streamId: "stream-task-1",
@@ -125,19 +126,28 @@ class FakeChannel implements ChannelAdapter {
     senderOpenId = "owner",
     messageId = this.latestCardMessageId(),
     formValue?: Record<string, unknown>,
+    chatId = "chat-owner",
   ): Promise<void> {
     if (!this.callback) throw new Error("channel has not started");
     await this.callback({
       kind: "card_action",
       eventId,
       messageId,
-      chatId: "chat-owner",
+      chatId,
       chatType: "unknown",
       senderOpenId,
       value,
       ...(formValue ? { formValue } : {}),
       receivedAt: new Date().toISOString(),
     });
+  }
+
+  latestCardMessageIdForChat(chatId: string): string {
+    for (let index = this.sent.length - 1; index >= 0; index -= 1) {
+      const message = this.sent[index];
+      if (message?.kind === "card" && message.chatId === chatId) return `sent-${index + 1}`;
+    }
+    return "missing-card-message";
   }
 
   private latestCardMessageId(): string {
@@ -956,6 +966,82 @@ describe("Bridge vertical slice", () => {
     expect(channel.createProjectSpace).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: "demo", ownerOpenId: "owner" }),
     );
+  });
+
+  it("migrates a legacy topic group and keeps project controls inside the group", async () => {
+    const channel = new FakeChannel();
+    channel.inspectProjectSpace.mockResolvedValueOnce({
+      status: "ready",
+      displayName: "[Codex] Demo",
+      messageMode: "thread",
+    });
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-existing-project",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("/menu", "group-console-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "open-existing-group",
+    );
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) =>
+            message.kind === "card" &&
+            message.chatId === "chat-existing-project" &&
+            message.text === "Demo 项目控制台",
+        ),
+      ).toBe(true),
+    );
+    expect(channel.configureProjectSpace).toHaveBeenCalledWith({
+      chatId: "chat-existing-project",
+    });
+
+    const groupCardId = channel.latestCardMessageIdForChat("chat-existing-project");
+    await channel.receiveCard(
+      { version: 1, action: "thread.new", projectId: "demo" },
+      "group-new-thread",
+      "owner",
+      groupCardId,
+      undefined,
+      "chat-existing-project",
+    );
+    await vi.waitFor(() =>
+      expect(database.getConversation("chat-existing-project")?.threadId).toBe("thread-created-1"),
+    );
+    expect(channel.createProjectTopic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatId: "chat-existing-project",
+        idempotencyKey: "clawbridge-thread-thread-created-1",
+      }),
+    );
+    expect(
+      channel.sent.some(
+        (message) =>
+          message.kind === "card" &&
+          message.chatId === "chat-existing-project" &&
+          message.audience === "group",
+      ),
+    ).toBe(true);
   });
 
   it("lists and selects an existing thread through card actions", async () => {

@@ -10,6 +10,7 @@ const larkMocks = vi.hoisted(() => ({
   getMessageResource: vi.fn(),
   createChat: vi.fn(),
   getChat: vi.fn(),
+  updateChat: vi.fn(),
   getChatMembers: vi.fn(),
   createChatMembers: vi.fn(),
   createCard: vi.fn(),
@@ -32,7 +33,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
     readonly im = {
       message: { create: larkMocks.createMessage, reply: larkMocks.replyMessage },
       messageResource: { get: larkMocks.getMessageResource },
-      chat: { create: larkMocks.createChat, get: larkMocks.getChat },
+      chat: { create: larkMocks.createChat, get: larkMocks.getChat, update: larkMocks.updateChat },
       chatMembers: { get: larkMocks.getChatMembers, create: larkMocks.createChatMembers },
     };
     readonly cardkit = {
@@ -104,6 +105,7 @@ describe("Feishu adapter card contract", () => {
       data: { items: [{ member_id: "ou-owner" }], has_more: false },
     });
     larkMocks.createChatMembers.mockResolvedValue({ code: 0, data: {} });
+    larkMocks.updateChat.mockResolvedValue({ code: 0, data: {} });
     larkMocks.createCard.mockResolvedValue({ code: 0, data: { card_id: "card-stream-1" } });
     larkMocks.updateCardContent.mockResolvedValue({ code: 0 });
     larkMocks.updateCardSettings.mockResolvedValue({ code: 0 });
@@ -364,7 +366,7 @@ describe("Feishu adapter card contract", () => {
     );
   });
 
-  it("creates a private thread-style project workspace with the owner", async () => {
+  it("creates a private project workspace with a chat control surface", async () => {
     const adapter = new FeishuAdapter(
       { appId: "cli-test", appSecret: "secret" },
       pino({ enabled: false }),
@@ -389,7 +391,7 @@ describe("Feishu adapter card contract", () => {
         description: "ClawBridge project workspace: demo",
         owner_id: "ou-owner",
         user_id_list: ["ou-owner"],
-        group_message_type: "thread",
+        group_message_type: "chat",
         chat_mode: "group",
         chat_type: "private",
         join_message_visibility: "not_anyone",
@@ -468,6 +470,22 @@ describe("Feishu adapter card contract", () => {
     });
   });
 
+  it("switches an existing project group to chat control plus threaded replies", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.configureProjectSpace({ chatId: "oc-project-1" }),
+    ).resolves.toBeUndefined();
+    expect(larkMocks.updateChat).toHaveBeenCalledWith({
+      params: { user_id_type: "open_id" },
+      path: { chat_id: "oc-project-1" },
+      data: { group_message_type: "chat" },
+    });
+  });
+
   it("creates a project topic root message with an idempotency key", async () => {
     const adapter = new FeishuAdapter(
       { appId: "cli-test", appSecret: "secret" },
@@ -488,6 +506,15 @@ describe("Feishu adapter card contract", () => {
         msg_type: "text",
         content: JSON.stringify({ text: "🧵 修复移动端布局" }),
         uuid: "thread-019f",
+      },
+    });
+    expect(larkMocks.replyMessage).toHaveBeenCalledWith({
+      path: { message_id: "om-sent-1" },
+      data: {
+        msg_type: "text",
+        content: JSON.stringify({ text: "在此话题中直接发送 Codex 任务。" }),
+        reply_in_thread: true,
+        uuid: "thread-019f-topic",
       },
     });
   });

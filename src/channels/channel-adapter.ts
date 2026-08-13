@@ -14,8 +14,10 @@ export interface ChannelAdapter {
   inspectProjectSpace?(input: { chatId: string; ownerOpenId: string }): Promise<{
     status: "ready" | "owner_absent" | "dissolved" | "missing";
     displayName?: string;
+    messageMode?: "chat" | "thread";
   }>;
   addProjectSpaceMember?(input: { chatId: string; ownerOpenId: string }): Promise<void>;
+  configureProjectSpace?(input: { chatId: string }): Promise<void>;
   createProjectTopic?(input: {
     chatId: string;
     title: string;

@@ -228,7 +228,7 @@ export class FeishuAdapter implements ChannelAdapter {
         description: `ClawBridge project workspace: ${input.projectId}`.slice(0, 100),
         owner_id: input.ownerOpenId,
         user_id_list: [input.ownerOpenId],
-        group_message_type: "thread",
+        group_message_type: "chat",
         chat_mode: "group",
         chat_type: "private",
         join_message_visibility: "not_anyone",
@@ -249,6 +249,7 @@ export class FeishuAdapter implements ChannelAdapter {
   async inspectProjectSpace(input: { chatId: string; ownerOpenId: string }): Promise<{
     status: "ready" | "owner_absent" | "dissolved" | "missing";
     displayName?: string;
+    messageMode?: "chat" | "thread";
   }> {
     const chat = await this.client.im.chat.get({
       params: { user_id_type: "open_id" },
@@ -280,7 +281,13 @@ export class FeishuAdapter implements ChannelAdapter {
         );
       }
       if (members.data?.items?.some((member) => member.member_id === input.ownerOpenId)) {
-        return { status: "ready", ...(chat.data?.name ? { displayName: chat.data.name } : {}) };
+        return {
+          status: "ready",
+          ...(chat.data?.name ? { displayName: chat.data.name } : {}),
+          ...(chat.data?.group_message_type === "chat" || chat.data?.group_message_type === "thread"
+            ? { messageMode: chat.data.group_message_type }
+            : {}),
+        };
       }
       pageToken = members.data?.has_more ? members.data.page_token : undefined;
     } while (pageToken);
@@ -288,6 +295,9 @@ export class FeishuAdapter implements ChannelAdapter {
     return {
       status: "owner_absent",
       ...(chat.data?.name ? { displayName: chat.data.name } : {}),
+      ...(chat.data?.group_message_type === "chat" || chat.data?.group_message_type === "thread"
+        ? { messageMode: chat.data.group_message_type }
+        : {}),
     };
   }
 
@@ -310,6 +320,17 @@ export class FeishuAdapter implements ChannelAdapter {
     }
   }
 
+  async configureProjectSpace(input: { chatId: string }): Promise<void> {
+    const response = await this.client.im.chat.update({
+      params: { user_id_type: "open_id" },
+      path: { chat_id: input.chatId },
+      data: { group_message_type: "chat" },
+    });
+    if (response.code !== 0) {
+      throw new Error(`Feishu configure project group failed: ${response.msg ?? response.code}`);
+    }
+  }
+
   async createProjectTopic(input: {
     chatId: string;
     title: string;
@@ -320,7 +341,7 @@ export class FeishuAdapter implements ChannelAdapter {
       .trim()
       .slice(0, 120);
     if (!title) throw new Error("Feishu project topic title cannot be empty");
-    const response = await this.client.im.message.create({
+    const root = await this.client.im.message.create({
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: input.chatId,
@@ -329,13 +350,26 @@ export class FeishuAdapter implements ChannelAdapter {
         uuid: input.idempotencyKey.slice(0, 50),
       },
     });
+    if (root.code !== 0) {
+      throw new Error(`Feishu create project topic failed: ${root.msg ?? root.code}`);
+    }
+    const rootMessageId = root.data?.message_id;
+    if (!rootMessageId) {
+      throw new Error("Feishu create project topic failed: response is missing message_id");
+    }
+    const response = await this.client.im.message.reply({
+      path: { message_id: rootMessageId },
+      data: {
+        msg_type: "text",
+        content: JSON.stringify({ text: "在此话题中直接发送 Codex 任务。" }),
+        reply_in_thread: true,
+        uuid: `${input.idempotencyKey}-topic`.slice(0, 50),
+      },
+    });
     if (response.code !== 0) {
       throw new Error(`Feishu create project topic failed: ${response.msg ?? response.code}`);
     }
-    const topicRootId = response.data?.message_id;
-    if (!topicRootId) {
-      throw new Error("Feishu create project topic failed: response is missing message_id");
-    }
+    const topicRootId = response.data?.root_id ?? rootMessageId;
     return { topicRootId };
   }
 

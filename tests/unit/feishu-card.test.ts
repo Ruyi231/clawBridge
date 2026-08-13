@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseCardAction,
   renderHomeCard,
+  renderProjectSpaceCard,
   renderApprovalCard,
   renderQuestionCard,
   renderProjectListCard,
@@ -173,6 +174,29 @@ describe("Feishu card rendering", () => {
     expect(actionRows.every((row) => (row.actions as unknown[]).length <= 2)).toBe(true);
   });
 
+  it("renders project controls in the group without exposing cross-project actions", () => {
+    const card = renderProjectSpaceCard({
+      project: { id: "demo", name: "Demo" },
+      thread: {
+        id: "thread-1",
+        projectId: "demo",
+        localNumber: 3,
+        title: "修复登录",
+      },
+    });
+    expect(card.header.title.content).toBe("Demo · 项目控制台");
+    expect(actions(card).map((item) => item.action)).toEqual([
+      "thread.list",
+      "thread.new",
+      "task.list",
+      "model.list",
+    ]);
+    expect(actions(card).every((item) => !("projectId" in item) || item.projectId === "demo")).toBe(
+      true,
+    );
+    expect(JSON.stringify(card)).toContain("任务请进入对应的独立话题");
+  });
+
   it("refuses to render a filesystem path as an action project ID", () => {
     expect(() =>
       renderHomeCard({
@@ -282,6 +306,21 @@ describe("Feishu card rendering", () => {
     expect(JSON.stringify(card)).toContain("第 2 / 3 页");
   });
 
+  it("returns from a project-group thread list without exposing the global project picker", () => {
+    const card = renderThreadListCard({
+      project: { id: "claw", name: "ClawBridge" },
+      threads: [],
+      projectSpace: true,
+    });
+    expect(actions(card)).toContainEqual({
+      version: 1,
+      action: "project.space",
+      projectId: "claw",
+    });
+    expect(actions(card).some((item) => item.action === "project.list")).toBe(false);
+    expect(actions(card).some((item) => item.action === "menu.refresh")).toBe(false);
+  });
+
   it("rejects invalid renderer page ranges", () => {
     expect(() => renderProjectListCard({ projects: [], page: 1, totalPages: 1 })).toThrow(
       "smaller than totalPages",
@@ -321,5 +360,19 @@ describe("Feishu card rendering", () => {
       projectId: "claw",
       page: 1,
     });
+  });
+
+  it("returns from a project-group task center to that same project", () => {
+    const card = renderTaskCenterCard({
+      project: { id: "claw", name: "ClawBridge" },
+      tasks: [],
+      projectSpace: true,
+    });
+    expect(actions(card)).toContainEqual({
+      version: 1,
+      action: "project.space",
+      projectId: "claw",
+    });
+    expect(actions(card).some((item) => item.action === "menu.refresh")).toBe(false);
   });
 });

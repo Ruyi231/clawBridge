@@ -183,6 +183,12 @@ export interface HomeCardInput {
   notice?: string | null;
 }
 
+export interface ProjectSpaceCardInput {
+  project: CardProject;
+  thread?: CardThread | null;
+  notice?: string | null;
+}
+
 export interface ProjectListCardInput {
   projects: CardProject[];
   selectedProjectId?: string | null;
@@ -202,6 +208,7 @@ export interface ThreadListCardInput {
   page?: number;
   /** Total page count. Valid pages are 0 through totalPages - 1. */
   totalPages?: number;
+  projectSpace?: boolean;
 }
 
 export interface TaskCenterCardInput {
@@ -209,6 +216,7 @@ export interface TaskCenterCardInput {
   project?: CardProject | null;
   page?: number;
   totalPages?: number;
+  projectSpace?: boolean;
 }
 
 export interface ModelListCardInput {
@@ -224,6 +232,7 @@ export interface ModelListCardInput {
   }>;
   selectedModel?: string | null;
   selectedReasoningEffort?: string | null;
+  projectSpace?: boolean;
 }
 
 export interface ApprovalCardInput {
@@ -319,7 +328,7 @@ function projectListAction(page?: number): CardAction {
 }
 
 function projectScopedAction(
-  actionName: "thread.list" | "thread.new",
+  actionName: "project.space" | "thread.list" | "thread.new",
   projectId: string,
   page?: number,
 ): CardAction {
@@ -435,6 +444,45 @@ export function renderHomeCard(input: HomeCardInput): FeishuCard {
     );
   }
   return card("ClawBridge 控制台", elements);
+}
+
+export function renderProjectSpaceCard(input: ProjectSpaceCardInput): FeishuCard {
+  const thread = input.thread
+    ? `#${input.thread.localNumber} ${displayText(input.thread.title || "未命名对话", 56)}`
+    : "未选择";
+  const elements: Array<Record<string, unknown>> = [
+    markdown(
+      `**项目：** ${displayText(input.project.name, 60)}\n**当前对话：** ${thread}\n\n项目操作在本群完成；Codex 任务请进入对应的独立话题发送。`,
+    ),
+  ];
+  if (input.notice?.trim()) elements.push(markdown(`💡 ${displayText(input.notice, 160)}`));
+  elements.push(
+    divider(),
+    actionRow([
+      button("查看对话", projectScopedAction("thread.list", input.project.id), "primary"),
+      button("新建对话", projectScopedAction("thread.new", input.project.id)),
+    ]),
+    actionRow([
+      button(
+        "项目任务",
+        action({ version: CARD_VERSION, action: "task.list", projectId: input.project.id }),
+      ),
+      ...(input.thread
+        ? [
+            button(
+              "模型设置",
+              action({
+                version: CARD_VERSION,
+                action: "model.list",
+                projectId: input.project.id,
+                threadId: input.thread.id,
+              }),
+            ),
+          ]
+        : []),
+    ]),
+  );
+  return card(`${displayText(input.project.name, 50)} · 项目控制台`, elements);
 }
 
 export function renderProjectListCard(input: ProjectListCardInput): FeishuCard {
@@ -572,7 +620,11 @@ export function renderModelListCard(input: ModelListCardInput): FeishuCard {
   }
   elements.push(
     divider(),
-    actionRow([button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" }))]),
+    actionRow([
+      input.projectSpace
+        ? button("返回项目", projectScopedAction("project.space", input.project.id))
+        : button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" })),
+    ]),
   );
   return card("模型与推理强度", elements);
 }
@@ -686,7 +738,9 @@ export function renderThreadListCard(input: ThreadListCardInput): FeishuCard {
     markdown(`**项目：** ${displayText(input.project.name, 72)}`),
     actionRow([
       button("新对话", projectScopedAction("thread.new", input.project.id), "primary"),
-      button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" })),
+      input.projectSpace
+        ? button("返回项目", projectScopedAction("project.space", input.project.id))
+        : button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" })),
     ]),
     divider(),
   ];
@@ -729,7 +783,9 @@ export function renderThreadListCard(input: ThreadListCardInput): FeishuCard {
     divider(),
     actionRow([
       button("刷新对话", projectScopedAction("thread.list", input.project.id, page)),
-      button("选择项目", projectListAction()),
+      input.projectSpace
+        ? button("返回项目", projectScopedAction("project.space", input.project.id))
+        : button("选择项目", projectListAction()),
     ]),
   );
   return card("选择对话", elements);
@@ -783,7 +839,9 @@ export function renderTaskCenterCard(input: TaskCenterCardInput): FeishuCard {
   elements.push(
     divider(),
     actionRow([
-      button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" })),
+      input.projectSpace && input.project
+        ? button("返回项目", projectScopedAction("project.space", input.project.id))
+        : button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" })),
       button(
         "刷新任务",
         action({
