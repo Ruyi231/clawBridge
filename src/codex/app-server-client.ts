@@ -410,7 +410,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
       child.stderr.on("data", (chunk: Buffer) => this.emit("stderr", chunk.toString("utf8")));
 
       await this.request("initialize", {
-        clientInfo: { name: "clawbridge", title: "ClawBridge", version: "2.0.3" },
+        clientInfo: { name: "clawbridge", title: "ClawBridge", version: "2.0.4" },
         capabilities: {},
       });
       if (this.child !== child) {

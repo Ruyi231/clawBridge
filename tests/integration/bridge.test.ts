@@ -22,6 +22,10 @@ class FakeChannel implements ChannelAdapter {
     chatId: "chat-created-project",
     displayName: `[Codex] ${input.projectName}`,
   }));
+  readonly inspectProjectSpace = vi.fn<NonNullable<ChannelAdapter["inspectProjectSpace"]>>(
+    async () => ({ status: "ready", displayName: "[Codex] Demo" }),
+  );
+  readonly addProjectSpaceMember = vi.fn(async () => undefined);
   readonly createProjectTopic = vi.fn(async () => ({ topicRootId: "topic-created-thread" }));
   readonly startTaskStream = vi.fn(async () => ({
     streamId: "stream-task-1",
@@ -850,6 +854,107 @@ describe("Bridge vertical slice", () => {
     });
     await vi.waitFor(() =>
       expect(database.getConversation("chat-owner")?.threadId).toBe("thread-bridge"),
+    );
+  });
+
+  it("reinvites the owner when an existing project group was temporarily left", async () => {
+    const channel = new FakeChannel();
+    channel.inspectProjectSpace.mockResolvedValueOnce({
+      status: "owner_absent",
+      displayName: "[Codex] Demo",
+    });
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-existing-project",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("/menu", "rejoin-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "rejoin-project-space",
+    );
+    await vi.waitFor(() =>
+      expect(channel.addProjectSpaceMember).toHaveBeenCalledWith({
+        chatId: "chat-existing-project",
+        ownerOpenId: "owner",
+      }),
+    );
+    expect(channel.createProjectSpace).not.toHaveBeenCalled();
+    expect(database.getFeishuProjectSpace("demo")?.chatId).toBe("chat-existing-project");
+  });
+
+  it("rebuilds a dissolved project group while preserving Codex history", async () => {
+    const channel = new FakeChannel();
+    channel.inspectProjectSpace.mockResolvedValueOnce({ status: "dissolved" });
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.upsertThread({
+      threadId: "thread-existing",
+      projectId: "demo",
+      title: "Existing work",
+      archived: false,
+    });
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-dissolved",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    database.bindFeishuThreadRoute({
+      threadId: "thread-existing",
+      projectId: "demo",
+      chatId: "chat-dissolved",
+      topicRootId: "topic-old",
+      ownerOpenId: "owner",
+    });
+    database.selectProject("chat-owner", "demo");
+    database.setThread("chat-owner", "demo", "thread-existing");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("/menu", "rebuild-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "rebuild-project-space",
+    );
+    await vi.waitFor(() =>
+      expect(database.getFeishuProjectSpace("demo")?.chatId).toBe("chat-created-project"),
+    );
+    expect(database.getProjectThread("demo", "thread-existing")?.title).toBe("Existing work");
+    expect(database.getFeishuThreadRoute("thread-existing")).toMatchObject({
+      chatId: "chat-created-project",
+      topicRootId: "topic-created-thread",
+    });
+    expect(channel.createProjectSpace).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "demo", ownerOpenId: "owner" }),
     );
   });
 

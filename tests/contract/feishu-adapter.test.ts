@@ -9,6 +9,9 @@ const larkMocks = vi.hoisted(() => ({
   replyMessage: vi.fn(),
   getMessageResource: vi.fn(),
   createChat: vi.fn(),
+  getChat: vi.fn(),
+  getChatMembers: vi.fn(),
+  createChatMembers: vi.fn(),
   createCard: vi.fn(),
   updateCardContent: vi.fn(),
   updateCardSettings: vi.fn(),
@@ -29,7 +32,8 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
     readonly im = {
       message: { create: larkMocks.createMessage, reply: larkMocks.replyMessage },
       messageResource: { get: larkMocks.getMessageResource },
-      chat: { create: larkMocks.createChat },
+      chat: { create: larkMocks.createChat, get: larkMocks.getChat },
+      chatMembers: { get: larkMocks.getChatMembers, create: larkMocks.createChatMembers },
     };
     readonly cardkit = {
       v1: {
@@ -91,6 +95,15 @@ describe("Feishu adapter card contract", () => {
       code: 0,
       data: { chat_id: "oc-project-1" },
     });
+    larkMocks.getChat.mockResolvedValue({
+      code: 0,
+      data: { name: "[Codex] Demo Project", chat_status: "normal" },
+    });
+    larkMocks.getChatMembers.mockResolvedValue({
+      code: 0,
+      data: { items: [{ member_id: "ou-owner" }], has_more: false },
+    });
+    larkMocks.createChatMembers.mockResolvedValue({ code: 0, data: {} });
     larkMocks.createCard.mockResolvedValue({ code: 0, data: { card_id: "card-stream-1" } });
     larkMocks.updateCardContent.mockResolvedValue({ code: 0 });
     larkMocks.updateCardSettings.mockResolvedValue({ code: 0 });
@@ -401,6 +414,58 @@ describe("Feishu adapter card contract", () => {
         idempotencyKey: "project-demo-123",
       }),
     ).rejects.toThrow("response is missing chat_id");
+  });
+
+  it("detects whether the project owner is still in an existing project group", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.inspectProjectSpace({ chatId: "oc-project-1", ownerOpenId: "ou-owner" }),
+    ).resolves.toEqual({ status: "ready", displayName: "[Codex] Demo Project" });
+    expect(larkMocks.getChatMembers).toHaveBeenCalledWith({
+      params: { member_id_type: "open_id", page_size: 100 },
+      path: { chat_id: "oc-project-1" },
+    });
+
+    larkMocks.getChatMembers.mockResolvedValueOnce({
+      code: 0,
+      data: { items: [{ member_id: "ou-someone-else" }], has_more: false },
+    });
+    await expect(
+      adapter.inspectProjectSpace({ chatId: "oc-project-1", ownerOpenId: "ou-owner" }),
+    ).resolves.toEqual({ status: "owner_absent", displayName: "[Codex] Demo Project" });
+  });
+
+  it("recognizes a dissolved project group without trying to list members", async () => {
+    larkMocks.getChat.mockResolvedValueOnce({ code: 232009, msg: "dissolved" });
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.inspectProjectSpace({ chatId: "oc-old", ownerOpenId: "ou-owner" }),
+    ).resolves.toEqual({ status: "dissolved" });
+    expect(larkMocks.getChatMembers).not.toHaveBeenCalled();
+  });
+
+  it("reinvites the owner to an existing private project group", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.addProjectSpaceMember({ chatId: "oc-project-1", ownerOpenId: "ou-owner" }),
+    ).resolves.toBeUndefined();
+    expect(larkMocks.createChatMembers).toHaveBeenCalledWith({
+      params: { member_id_type: "open_id", succeed_type: 2 },
+      path: { chat_id: "oc-project-1" },
+      data: { id_list: ["ou-owner"] },
+    });
   });
 
   it("creates a project topic root message with an idempotency key", async () => {

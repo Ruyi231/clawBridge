@@ -974,6 +974,44 @@ export class Bridge {
       throw new Error("项目不存在或已停用，请刷新项目列表。");
     }
     let space = database.getFeishuProjectSpace(projectId);
+    let notice: string | undefined;
+    if (space && channel.inspectProjectSpace) {
+      const inspection = await channel.inspectProjectSpace({
+        chatId: space.chatId,
+        ownerOpenId,
+      });
+      if (inspection.status === "owner_absent") {
+        if (!channel.addProjectSpaceMember) {
+          throw new Error(
+            "你已经退出原项目群，但当前消息通道不能自动重新邀请。请开通飞书“添加、移除群成员”权限后重试。",
+          );
+        }
+        await channel.addProjectSpaceMember({ chatId: space.chatId, ownerOpenId });
+        notice = "已重新邀请你加入原项目群，原有对话话题保持不变";
+      } else if (inspection.status === "dissolved" || inspection.status === "missing") {
+        if (!channel.createProjectSpace) throw new Error("当前消息通道不支持重建项目群。");
+        const created = await channel.createProjectSpace({
+          projectId,
+          projectName: project.name,
+          ownerOpenId,
+          idempotencyKey: `clawbridge-rebuild-${randomUUID()}`,
+        });
+        space = database.replaceFeishuProjectSpace({
+          projectId,
+          chatId: created.chatId,
+          ownerOpenId,
+          displayName: created.displayName,
+        });
+        notice = "原项目群已失效，已重建项目群；Codex 对话历史仍保留，进入对话时会重建话题";
+      } else if (inspection.displayName && inspection.displayName !== space.displayName) {
+        space = database.bindFeishuProjectSpace({
+          projectId,
+          chatId: space.chatId,
+          ownerOpenId,
+          displayName: inspection.displayName,
+        });
+      }
+    }
     if (!space) {
       if (!channel.createProjectSpace) throw new Error("当前消息通道不支持创建项目群。");
       const created = await channel.createProjectSpace({
@@ -988,6 +1026,7 @@ export class Bridge {
         ownerOpenId,
         displayName: created.displayName,
       });
+      notice = "项目群已创建";
     }
 
     const selected = database.getConversation(controlChatId);
@@ -1011,15 +1050,17 @@ export class Bridge {
       });
       await this.showHomeCard(
         controlChatId,
-        `项目群已就绪，对话 #${thread.localNumber} 已建立话题`,
+        `${notice ? `${notice}；` : "项目群已就绪，"}对话 #${thread.localNumber} 已建立话题`,
       );
       return;
     }
     await this.showHomeCard(
       controlChatId,
       thread
-        ? "项目群和当前对话话题已经存在"
-        : "项目群已创建；选择一个对话后再次点击“项目群”建立话题",
+        ? (notice ?? "项目群和当前对话话题已经存在")
+        : notice
+          ? `${notice}；选择一个对话后再次点击“项目群”建立话题`
+          : "项目群已经存在；选择一个对话后再次点击“项目群”建立话题",
     );
   }
 

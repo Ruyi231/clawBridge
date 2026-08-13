@@ -997,6 +997,19 @@ export class BridgeDatabase {
     return this.getFeishuProjectSpace(input.projectId)!;
   }
 
+  replaceFeishuProjectSpace(input: {
+    projectId: string;
+    chatId: string;
+    ownerOpenId: string;
+    displayName: string;
+  }): FeishuProjectSpaceRecord {
+    return this.database.transaction(() => {
+      const space = this.bindFeishuProjectSpace(input);
+      this.deleteFeishuThreadRoutes(input.projectId);
+      return space;
+    })();
+  }
+
   getFeishuProjectSpace(projectId: string): FeishuProjectSpaceRecord | undefined {
     const row = this.database
       .prepare("SELECT * FROM feishu_project_spaces WHERE project_id = ?")
@@ -1092,6 +1105,12 @@ export class BridgeDatabase {
         .prepare("SELECT * FROM feishu_thread_routes WHERE project_id = ? ORDER BY updated_at DESC")
         .all(projectId) as FeishuThreadRouteRow[]
     ).map((row) => this.toFeishuThreadRoute(row));
+  }
+
+  deleteFeishuThreadRoutes(projectId: string): number {
+    return this.database
+      .prepare("DELETE FROM feishu_thread_routes WHERE project_id = ?")
+      .run(projectId).changes;
   }
 
   deleteFeishuThreadRoute(threadId: string): boolean {

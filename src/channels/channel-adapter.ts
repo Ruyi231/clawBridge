@@ -11,6 +11,11 @@ export interface ChannelAdapter {
     ownerOpenId: string;
     idempotencyKey: string;
   }): Promise<{ chatId: string; displayName: string }>;
+  inspectProjectSpace?(input: { chatId: string; ownerOpenId: string }): Promise<{
+    status: "ready" | "owner_absent" | "dissolved" | "missing";
+    displayName?: string;
+  }>;
+  addProjectSpaceMember?(input: { chatId: string; ownerOpenId: string }): Promise<void>;
   createProjectTopic?(input: {
     chatId: string;
     title: string;

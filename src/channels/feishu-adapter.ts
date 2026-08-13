@@ -246,6 +246,70 @@ export class FeishuAdapter implements ChannelAdapter {
     return { chatId, displayName };
   }
 
+  async inspectProjectSpace(input: { chatId: string; ownerOpenId: string }): Promise<{
+    status: "ready" | "owner_absent" | "dissolved" | "missing";
+    displayName?: string;
+  }> {
+    const chat = await this.client.im.chat.get({
+      params: { user_id_type: "open_id" },
+      path: { chat_id: input.chatId },
+    });
+    if (chat.code === 232006) return { status: "missing" };
+    if (chat.code === 232009 || chat.data?.chat_status?.startsWith("dissolved")) {
+      return { status: "dissolved" };
+    }
+    if (chat.code !== 0) {
+      throw new Error(`Feishu inspect project group failed: ${chat.msg ?? chat.code}`);
+    }
+
+    let pageToken: string | undefined;
+    do {
+      const members = await this.client.im.chatMembers.get({
+        params: {
+          member_id_type: "open_id",
+          page_size: 100,
+          ...(pageToken ? { page_token: pageToken } : {}),
+        },
+        path: { chat_id: input.chatId },
+      });
+      if (members.code === 232006) return { status: "missing" };
+      if (members.code === 232009) return { status: "dissolved" };
+      if (members.code !== 0) {
+        throw new Error(
+          `Feishu inspect project group members failed: ${members.msg ?? members.code}`,
+        );
+      }
+      if (members.data?.items?.some((member) => member.member_id === input.ownerOpenId)) {
+        return { status: "ready", ...(chat.data?.name ? { displayName: chat.data.name } : {}) };
+      }
+      pageToken = members.data?.has_more ? members.data.page_token : undefined;
+    } while (pageToken);
+
+    return {
+      status: "owner_absent",
+      ...(chat.data?.name ? { displayName: chat.data.name } : {}),
+    };
+  }
+
+  async addProjectSpaceMember(input: { chatId: string; ownerOpenId: string }): Promise<void> {
+    const response = await this.client.im.chatMembers.create({
+      params: { member_id_type: "open_id", succeed_type: 2 },
+      path: { chat_id: input.chatId },
+      data: { id_list: [input.ownerOpenId] },
+    });
+    if (response.code !== 0) {
+      throw new Error(`Feishu rejoin project group failed: ${response.msg ?? response.code}`);
+    }
+    const rejected = [
+      ...(response.data?.invalid_id_list ?? []),
+      ...(response.data?.not_existed_id_list ?? []),
+      ...(response.data?.pending_approval_id_list ?? []),
+    ];
+    if (rejected.includes(input.ownerOpenId)) {
+      throw new Error("Feishu rejoin project group failed: the owner was not added");
+    }
+  }
+
   async createProjectTopic(input: {
     chatId: string;
     title: string;
