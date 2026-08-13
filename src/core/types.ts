@@ -46,6 +46,8 @@ export interface TaskRecord {
   threadId: string | null;
   /** Feishu root message to reply inside when the task originated from a project topic. */
   replyToMessageId: string | null;
+  progressText: string;
+  progressSummary: string | null;
   createdAt: string;
   updatedAt: string;
   error: string | null;

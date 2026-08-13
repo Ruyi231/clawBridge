@@ -3,6 +3,7 @@ import {
   parseCardAction,
   renderHomeCard,
   renderProjectListCard,
+  renderTaskCenterCard,
   renderThreadListCard,
   type FeishuCard,
 } from "../../src/channels/feishu-card.js";
@@ -29,6 +30,8 @@ describe("parseCardAction", () => {
       { version: 1, action: "project.list", page: 1_000 },
       { version: 1, action: "project.use", projectId: "desktop@abc-123" },
       { version: 1, action: "project.space", projectId: "claw" },
+      { version: 1, action: "task.list" },
+      { version: 1, action: "task.list", projectId: "claw", page: 3 },
       { version: 1, action: "thread.list", projectId: "claw" },
       { version: 1, action: "thread.list", projectId: "claw", page: 7 },
       { version: 1, action: "thread.use", projectId: "claw", threadId: "019f-aa" },
@@ -77,13 +80,16 @@ describe("Feishu card rendering", () => {
       "thread.list",
       "project.space",
       "thread.new",
+      "task.list",
+      "task.list",
       "menu.refresh",
       "chat.close",
       "task.stop",
     ]);
     const actionRows = card.elements.filter((element) => element.tag === "action");
-    expect(actionRows).toHaveLength(4);
+    expect(actionRows).toHaveLength(5);
     expect(actionRows.map((row) => row.layout)).toEqual([
+      "bisected",
       "bisected",
       "bisected",
       "bisected",
@@ -93,7 +99,13 @@ describe("Feishu card rendering", () => {
       actionRows.map((row) =>
         (row.actions as Array<{ text: { content: string } }>).map((item) => item.text.content),
       ),
-    ).toEqual([["选择项目", "选择对话"], ["项目群", "新对话"], ["刷新", "交还桌面"], ["停止任务"]]);
+    ).toEqual([
+      ["选择项目", "选择对话"],
+      ["项目群", "新对话"],
+      ["全部任务", "项目任务"],
+      ["刷新", "交还桌面"],
+      ["停止任务"],
+    ]);
     expect(actionRows.every((row) => (row.actions as unknown[]).length <= 2)).toBe(true);
     const summary = card.elements[0] as { text: { content: string } };
     expect(summary.text.content).toContain("修复 \\*卡片\\* \\[测试\\]");
@@ -105,20 +117,18 @@ describe("Feishu card rendering", () => {
     expect(actions(card).map((item) => item.action)).toEqual([
       "project.list",
       "menu.refresh",
+      "task.list",
       "task.stop",
       "chat.close",
     ]);
     const actionRows = card.elements.filter((element) => element.tag === "action");
-    expect(actionRows.map((row) => row.layout)).toEqual(["bisected", "bisected"]);
+    expect(actionRows.map((row) => row.layout)).toEqual(["bisected", "bisected", "flow"]);
     expect(
       actionRows.map((row) =>
         (row.actions as Array<{ text: { content: string } }>).map((item) => item.text.content),
       ),
-    ).toEqual([
-      ["选择项目", "刷新"],
-      ["停止任务", "交还桌面"],
-    ]);
-    expect(actionRows.every((row) => (row.actions as unknown[]).length === 2)).toBe(true);
+    ).toEqual([["选择项目", "刷新"], ["全部任务", "停止任务"], ["交还桌面"]]);
+    expect(actionRows.every((row) => (row.actions as unknown[]).length <= 2)).toBe(true);
   });
 
   it("refuses to render a filesystem path as an action project ID", () => {
@@ -242,5 +252,32 @@ describe("Feishu card rendering", () => {
         totalPages: 1_001,
       }),
     ).toThrow();
+  });
+
+  it("renders a scoped task center with safe pagination", () => {
+    const card = renderTaskCenterCard({
+      project: { id: "claw", name: "ClawBridge" },
+      tasks: [
+        {
+          id: "task-123456789",
+          projectName: "ClawBridge",
+          state: "running",
+          prompt: "实现任务中心",
+          progressSummary: "正在同步数据库",
+          updatedAt: "2026-08-13T06:00:00Z",
+        },
+      ],
+      page: 0,
+      totalPages: 2,
+    });
+
+    expect(card.header.title.content).toBe("项目任务中心");
+    expect(JSON.stringify(card)).toContain("正在同步数据库");
+    expect(actions(card)).toContainEqual({
+      version: 1,
+      action: "task.list",
+      projectId: "claw",
+      page: 1,
+    });
   });
 });

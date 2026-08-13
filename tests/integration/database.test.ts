@@ -164,6 +164,34 @@ describe("task persistence", () => {
     });
   });
 
+  it("stores incremental task progress and lists tasks by project", () => {
+    database.syncProjects([
+      { id: "demo", name: "Demo", rootPath: "D:/demo", enabled: true },
+      { id: "other", name: "Other", rootPath: "D:/other", enabled: true },
+    ]);
+    const task = database.enqueue(
+      {
+        eventId: "progress-event",
+        messageId: "progress-message",
+        chatId: "chat-1",
+        chatType: "p2p",
+        senderOpenId: "owner",
+        text: "执行任务",
+        receivedAt: new Date().toISOString(),
+      },
+      "demo",
+    );
+    expect(task).not.toBeNull();
+    database.updateTaskProgress(task!.id, "正在分析代码", "分析中");
+
+    expect(database.getTask(task!.id)).toMatchObject({
+      progressText: "正在分析代码",
+      progressSummary: "分析中",
+    });
+    expect(database.listTasks({ projectId: "demo" }).map((item) => item.id)).toEqual([task!.id]);
+    expect(database.listTasks({ projectId: "other" })).toEqual([]);
+  });
+
   it("proves card callbacks came from a sent Bridge card in the same chat", () => {
     const card = { schema: "2.0", body: { elements: [] } };
     const sentCard = database.queueOutbound({

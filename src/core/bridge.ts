@@ -6,6 +6,7 @@ import {
   parseCardAction,
   renderHomeCard,
   renderProjectListCard,
+  renderTaskCenterCard,
   renderThreadListCard,
   type CardAction,
   type FeishuCard,
@@ -17,6 +18,7 @@ import type {
 } from "../codex/protocol-types.js";
 import type { BridgeConfig, ProjectConfig } from "../config/schema.js";
 import { renderFinalReply, splitMessage } from "../delivery/reply-renderer.js";
+import { TaskStreamPump } from "../delivery/task-stream-pump.js";
 import type { BridgeDatabase, ProjectRecord, ThreadIndexRecord } from "../persistence/database.js";
 import type { DesktopProjectSource } from "../projects/codex-desktop-project-discovery.js";
 import { ProjectManager } from "../projects/project-manager.js";
@@ -365,7 +367,7 @@ export class Bridge {
   }
 
   private async runTask(task: TaskRecord): Promise<void> {
-    const { database, codex, config, logger } = this.dependencies;
+    const { database, codex, config, logger, channel } = this.dependencies;
     await this.refreshDesktopProjects();
     this.assertNotStopping();
     const project = database.getProject(task.projectId);
@@ -392,6 +394,8 @@ export class Bridge {
     let activeThreadId = threadId;
     let leasedThreadId = threadId;
     const holder = `task:${task.id}`;
+    let streamId: string | undefined;
+    let streamPump: TaskStreamPump | undefined;
     if (threadId && !database.acquireLease(threadId, holder, config.codex.turnTimeoutMs + 30_000)) {
       database.updateTask(task.id, "failed", { error: "Thread is already leased" });
       this.reply(
@@ -410,6 +414,23 @@ export class Bridge {
 
     database.updateTask(task.id, "running", { ...(threadId ? { threadId } : {}) });
     try {
+      if (channel.startTaskStream && channel.updateTaskStream) {
+        try {
+          const stream = await channel.startTaskStream({
+            chatId: task.chatId,
+            replyToMessageId: task.replyToMessageId,
+            title: `${project.name} · 任务运行中`,
+            initialText: "正在连接 Codex…",
+          });
+          streamId = stream.streamId;
+          streamPump = new TaskStreamPump(
+            (content) => channel.updateTaskStream!(stream.streamId, content),
+            400,
+          );
+        } catch (error) {
+          logger.warn({ err: error, taskId: task.id }, "Task streaming is unavailable");
+        }
+      }
       const cwd = await this.resolveRuntimeProjectPath(project.rootPath);
       this.assertNotStopping();
       const result = await codex.runTurn({
@@ -439,7 +460,35 @@ export class Bridge {
             leasedThreadId = startedThreadId;
           }
         },
+        onProgress: (event) => {
+          if (event.type === "assistantDelta") {
+            const current = database.getTask(task.id)?.progressText ?? "";
+            const next = `${current}${event.delta}`.slice(-30_000);
+            database.updateTaskProgress(task.id, next, this.preview(next));
+            streamPump?.push(next);
+            return;
+          }
+          if (event.type === "plan") {
+            const summary = event.steps
+              .map((step) => `${step.status === "completed" ? "✓" : "·"} ${step.step}`)
+              .join(" · ");
+            database.updateTaskProgress(
+              task.id,
+              database.getTask(task.id)?.progressText ?? "",
+              summary,
+            );
+            streamPump?.push(`**当前计划**\n${summary}`);
+          }
+        },
       });
+      try {
+        await streamPump?.close(result.finalText);
+        if (streamId && channel.finishTaskStream) {
+          await channel.finishTaskStream(streamId, `${project.name} · 已完成`);
+        }
+      } catch (streamError) {
+        logger.warn({ err: streamError, taskId: task.id }, "Failed to finalize task stream");
+      }
       database.upsertThread({
         threadId: result.threadId,
         projectId: task.projectId,
@@ -462,6 +511,14 @@ export class Bridge {
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      try {
+        await streamPump?.close(`任务结束：${detail}`);
+        if (streamId && channel.finishTaskStream) {
+          await channel.finishTaskStream(streamId, `${project.name} · 任务结束`);
+        }
+      } catch (streamError) {
+        logger.warn({ err: streamError, taskId: task.id }, "Failed to finalize task stream");
+      }
       if (activeThreadId) {
         database.upsertThread({
           threadId: activeThreadId,
@@ -607,6 +664,9 @@ export class Bridge {
       case "task.stop":
         await this.runStop(event.chatId);
         return;
+      case "task.list":
+        await this.showTaskCenter(event.chatId, action.projectId, action.page ?? 0);
+        return;
       case "chat.close":
         await this.runChatClose(event.chatId);
         return;
@@ -742,6 +802,36 @@ export class Bridge {
         totalPages,
       }),
       "选择项目",
+    );
+  }
+
+  private async showTaskCenter(
+    chatId: string,
+    projectId?: string,
+    requestedPage = 0,
+  ): Promise<void> {
+    const { database } = this.dependencies;
+    const project = projectId ? database.getProject(projectId) : undefined;
+    if (projectId && !project) throw new Error("项目不存在，请刷新控制台。");
+    const rows = database.listTasks({ ...(projectId ? { projectId } : {}), limit: 100 });
+    const totalPages = Math.max(1, Math.ceil(rows.length / 10));
+    const page = Math.min(requestedPage, totalPages - 1);
+    this.replyCard(
+      chatId,
+      renderTaskCenterCard({
+        tasks: rows.slice(page * 10, page * 10 + 10).map((task) => ({
+          id: task.id,
+          projectName: database.getProject(task.projectId)?.name ?? task.projectId,
+          state: task.state,
+          prompt: task.prompt,
+          progressSummary: task.progressSummary,
+          updatedAt: task.updatedAt,
+        })),
+        ...(project ? { project: { id: project.id, name: project.name } } : {}),
+        page,
+        totalPages,
+      }),
+      project ? "项目任务中心" : "全局任务中心",
     );
   }
 

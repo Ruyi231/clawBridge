@@ -13,6 +13,7 @@ export class FeishuAdapter implements ChannelAdapter {
   private hasConnected = false;
   private stopped = false;
   private fatalErrorHandler: ((error: Error) => void) | undefined;
+  private readonly streamSequences = new Map<string, { elementId: string; sequence: number }>();
 
   constructor(
     credentials: { appId: string; appSecret: string },
@@ -249,5 +250,88 @@ export class FeishuAdapter implements ChannelAdapter {
       throw new Error("Feishu create project topic failed: response is missing message_id");
     }
     return { topicRootId };
+  }
+
+  async startTaskStream(input: {
+    chatId: string;
+    replyToMessageId?: string | null;
+    title: string;
+    initialText: string;
+  }): Promise<{ streamId: string; messageId: string }> {
+    const elementId = "task_stream_content";
+    const card = {
+      schema: "2.0",
+      config: {
+        streaming_mode: true,
+        summary: { content: input.title.slice(0, 100) },
+        streaming_config: {
+          print_frequency_ms: { default: 60 },
+          print_step: { default: 1 },
+          print_strategy: "fast",
+        },
+      },
+      body: {
+        elements: [{ tag: "markdown", element_id: elementId, content: input.initialText }],
+      },
+    };
+    const created = await this.client.cardkit.v1.card.create({
+      data: { type: "card_json", data: JSON.stringify(card) },
+    });
+    const cardId = created.data?.card_id;
+    if (created.code !== 0 || !cardId) {
+      throw new Error(`Feishu stream card create failed: ${created.msg ?? created.code}`);
+    }
+    const content = JSON.stringify({ type: "card", data: { card_id: cardId } });
+    const sent = input.replyToMessageId
+      ? await this.client.im.message.reply({
+          path: { message_id: input.replyToMessageId },
+          data: { msg_type: "interactive", content, reply_in_thread: true },
+        })
+      : await this.client.im.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: { receive_id: input.chatId, msg_type: "interactive", content },
+        });
+    const messageId = sent.data?.message_id;
+    if (sent.code !== 0 || !messageId) {
+      throw new Error(`Feishu stream card send failed: ${sent.msg ?? sent.code}`);
+    }
+    this.streamSequences.set(cardId, { elementId, sequence: 0 });
+    return { streamId: cardId, messageId };
+  }
+
+  async updateTaskStream(streamId: string, content: string): Promise<void> {
+    const stream = this.streamSequences.get(streamId);
+    if (!stream) throw new Error("Unknown Feishu task stream");
+    const sequence = ++stream.sequence;
+    const response = await this.client.cardkit.v1.cardElement.content({
+      path: { card_id: streamId, element_id: stream.elementId },
+      data: { content: content.slice(-30_000), sequence, uuid: `task-${streamId}-${sequence}` },
+    });
+    if (response.code !== 0) {
+      throw new Error(`Feishu task stream update failed: ${response.msg ?? response.code}`);
+    }
+  }
+
+  async finishTaskStream(streamId: string, summary: string): Promise<void> {
+    const stream = this.streamSequences.get(streamId);
+    if (!stream) return;
+    const sequence = ++stream.sequence;
+    try {
+      const response = await this.client.cardkit.v1.card.settings({
+        path: { card_id: streamId },
+        data: {
+          settings: JSON.stringify({
+            config: { streaming_mode: false, summary: { content: summary.slice(0, 100) } },
+          }),
+          sequence,
+          uuid: `finish-${streamId}-${sequence}`,
+        },
+      });
+      if (response.code !== 0) {
+        throw new Error(`Feishu task stream finish failed: ${response.msg ?? response.code}`);
+      }
+    } finally {
+      this.streamSequences.delete(streamId);
+    }
   }
 }

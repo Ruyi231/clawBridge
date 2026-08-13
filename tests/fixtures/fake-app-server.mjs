@@ -201,6 +201,14 @@ input.on("line", (line) => {
     if (prompt === "hang") return;
     setTimeout(() => {
       send({
+        method: "item/agentMessage/delta",
+        params: { threadId: activeThreadId, turnId: activeTurnId, delta: "fake " },
+      });
+      send({
+        method: "item/agentMessage/delta",
+        params: { threadId: activeThreadId, turnId: activeTurnId, delta: "result" },
+      });
+      send({
         method: "item/completed",
         params: {
           threadId: activeThreadId,

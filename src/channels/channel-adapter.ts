@@ -16,4 +16,12 @@ export interface ChannelAdapter {
     title: string;
     idempotencyKey: string;
   }): Promise<{ topicRootId: string }>;
+  startTaskStream?(input: {
+    chatId: string;
+    replyToMessageId?: string | null;
+    title: string;
+    initialText: string;
+  }): Promise<{ streamId: string; messageId: string }>;
+  updateTaskStream?(streamId: string, content: string): Promise<void>;
+  finishTaskStream?(streamId: string, summary: string): Promise<void>;
 }

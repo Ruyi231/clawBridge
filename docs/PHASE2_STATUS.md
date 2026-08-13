@@ -54,6 +54,14 @@
 - 任务入队时持久化话题根消息 ID，Bridge 重启后仍会把入队、完成、失败、停止和释放警告通过 `reply_in_thread` 回到原话题
 - 数据库 v6 增加项目群/话题绑定，v7 增加任务话题回传字段；旧项目、旧任务和旧 delivery 均保持兼容
 
+### ClawBridge 2.0-B：任务中心与流式输出
+
+- 控制台提供“全部任务”和“项目任务”两个入口，均从同一 SQLite 任务快照读取并支持每页 10 条分页
+- Codex App Server 客户端归一化 `item/agentMessage/delta`，任务执行器把增量正文和计划摘要持久化到数据库 v8 字段
+- 飞书通道通过 CardKit 创建 `streaming_mode` 卡片，按单卡单调 sequence 更新 markdown 元素，并在终态关闭流式模式
+- 流式泵按约 400 ms 合并快速增量，保证 API 更新串行；最终文本会在关闭前强制 flush
+- 流式能力是增强路径：创建、增量更新或最终关闭失败只记录脱敏警告，不替代持久 outbox 的最终成功/失败消息
+
 方法语义参考 [OpenAI 官方 Codex App Server 文档](https://developers.openai.com/codex/app-server)，未依赖实验性的对话分页接口。实际 JSON-RPC wire 字段和枚举以本机 Codex CLI `0.147.0` 运行 `codex app-server generate-json-schema` 生成的 schema 为当前基线，并已用同一二进制完成真实验证。
 
 2026-08-11 的 App Server smoke 覆盖 `initialize`、最小只读回合、新建、命名、历史读取、未归档列表、归档列表、恢复和最终再次归档，所有断言均通过。测试对话最终保持归档。该结论不代表跨版本兼容，也不代表飞书中的旧 Bridge 进程已经重新加载本次构建。

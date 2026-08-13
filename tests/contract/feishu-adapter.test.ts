@@ -5,6 +5,9 @@ const larkMocks = vi.hoisted(() => ({
   createMessage: vi.fn(),
   replyMessage: vi.fn(),
   createChat: vi.fn(),
+  createCard: vi.fn(),
+  updateCardContent: vi.fn(),
+  updateCardSettings: vi.fn(),
   wsStart: vi.fn(),
   wsClose: vi.fn(),
   handlers: {} as Record<string, (payload: unknown) => unknown>,
@@ -22,6 +25,12 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
     readonly im = {
       message: { create: larkMocks.createMessage, reply: larkMocks.replyMessage },
       chat: { create: larkMocks.createChat },
+    };
+    readonly cardkit = {
+      v1: {
+        card: { create: larkMocks.createCard, settings: larkMocks.updateCardSettings },
+        cardElement: { content: larkMocks.updateCardContent },
+      },
     };
   },
   WSClient: class {
@@ -73,6 +82,9 @@ describe("Feishu adapter card contract", () => {
       code: 0,
       data: { chat_id: "oc-project-1" },
     });
+    larkMocks.createCard.mockResolvedValue({ code: 0, data: { card_id: "card-stream-1" } });
+    larkMocks.updateCardContent.mockResolvedValue({ code: 0 });
+    larkMocks.updateCardSettings.mockResolvedValue({ code: 0 });
     larkMocks.wsStart.mockImplementation(() => {
       (larkMocks.wsOptions.onReady as (() => void) | undefined)?.();
     });
@@ -330,5 +342,46 @@ describe("Feishu adapter card contract", () => {
         uuid: "thread-019f",
       },
     });
+  });
+
+  it("creates, updates, and finalizes a CardKit task stream inside a topic", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.startTaskStream({
+        chatId: "oc-project",
+        replyToMessageId: "om-topic-root",
+        title: "Demo · 任务运行中",
+        initialText: "正在连接 Codex…",
+      }),
+    ).resolves.toEqual({ streamId: "card-stream-1", messageId: "om-reply-1" });
+    expect(larkMocks.replyMessage).toHaveBeenCalledWith({
+      path: { message_id: "om-topic-root" },
+      data: {
+        msg_type: "interactive",
+        content: JSON.stringify({ type: "card", data: { card_id: "card-stream-1" } }),
+        reply_in_thread: true,
+      },
+    });
+
+    await adapter.updateTaskStream("card-stream-1", "正在修改文件");
+    expect(larkMocks.updateCardContent).toHaveBeenCalledWith({
+      path: { card_id: "card-stream-1", element_id: "task_stream_content" },
+      data: {
+        content: "正在修改文件",
+        sequence: 1,
+        uuid: "task-card-stream-1-1",
+      },
+    });
+    await adapter.finishTaskStream("card-stream-1", "Demo · 已完成");
+    expect(larkMocks.updateCardSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: { card_id: "card-stream-1" },
+        data: expect.objectContaining({ sequence: 2 }),
+      }),
+    );
   });
 });

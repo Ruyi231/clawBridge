@@ -152,6 +152,10 @@ export function normalizeCodexEvent(
   const params = asRecord(message.params);
   const ids = withIds(params);
 
+  if (message.method === "item/agentMessage/delta" && typeof params?.delta === "string") {
+    return { type: "assistantDelta", ...ids, delta: params.delta };
+  }
+
   if (message.method === "turn/plan/updated" && Array.isArray(params?.plan)) {
     const steps = params.plan
       .map(asRecord)

@@ -2,6 +2,19 @@ import { describe, expect, it } from "vitest";
 import { normalizeCodexEvent } from "../../src/codex/event-normalizer.js";
 
 describe("normalizeCodexEvent", () => {
+  it("normalizes assistant text deltas for streaming", () => {
+    expect(
+      normalizeCodexEvent({
+        method: "item/agentMessage/delta",
+        params: { threadId: "thread-1", turnId: "turn-1", delta: "增量内容" },
+      }),
+    ).toEqual({
+      type: "assistantDelta",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      delta: "增量内容",
+    });
+  });
   it("normalizes plan updates", () => {
     expect(
       normalizeCodexEvent({

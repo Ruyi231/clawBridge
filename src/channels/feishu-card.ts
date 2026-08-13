@@ -28,6 +28,14 @@ const actionSchemas = [
   z
     .object({
       version: z.literal(CARD_VERSION),
+      action: z.literal("task.list"),
+      projectId: projectIdSchema.optional(),
+      page: cardPageSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
       action: z.literal("project.use"),
       projectId: projectIdSchema,
     })
@@ -96,6 +104,15 @@ export interface CardThread {
   status?: string | null;
 }
 
+export interface CardTask {
+  id: string;
+  projectName: string;
+  state: string;
+  prompt: string;
+  progressSummary?: string | null;
+  updatedAt: string;
+}
+
 export interface HomeCardInput {
   project: CardProject | null;
   thread: CardThread | null;
@@ -121,6 +138,13 @@ export interface ThreadListCardInput {
   /** Zero-based page number used in callback values. */
   page?: number;
   /** Total page count. Valid pages are 0 through totalPages - 1. */
+  totalPages?: number;
+}
+
+export interface TaskCenterCardInput {
+  tasks: CardTask[];
+  project?: CardProject | null;
+  page?: number;
   totalPages?: number;
 }
 
@@ -275,6 +299,13 @@ export function renderHomeCard(input: HomeCardInput): FeishuCard {
         button("新对话", projectScopedAction("thread.new", input.project.id)),
       ]),
       actionRow([
+        button("全部任务", action({ version: CARD_VERSION, action: "task.list" })),
+        button(
+          "项目任务",
+          action({ version: CARD_VERSION, action: "task.list", projectId: input.project.id }),
+        ),
+      ]),
+      actionRow([
         button("刷新", action({ version: CARD_VERSION, action: "menu.refresh" })),
         button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" })),
       ]),
@@ -287,9 +318,10 @@ export function renderHomeCard(input: HomeCardInput): FeishuCard {
   } else {
     elements.push(
       actionRow([
+        button("全部任务", action({ version: CARD_VERSION, action: "task.list" })),
         button("停止任务", action({ version: CARD_VERSION, action: "task.stop" }), "danger"),
-        button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" })),
       ]),
+      actionRow([button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" }))]),
     );
   }
   return card("ClawBridge 控制台", elements);
@@ -396,4 +428,67 @@ export function renderThreadListCard(input: ThreadListCardInput): FeishuCard {
     ]),
   );
   return card("选择对话", elements);
+}
+
+export function renderTaskCenterCard(input: TaskCenterCardInput): FeishuCard {
+  const { page, totalPages } = pagination(input);
+  const scope = input.project ? `项目：${displayText(input.project.name, 56)}` : "全部项目";
+  const elements: Array<Record<string, unknown>> = [markdown(`**范围：** ${scope}`), divider()];
+  if (input.tasks.length === 0) {
+    elements.push(markdown("暂无任务。"));
+  } else {
+    for (const task of input.tasks.slice(0, MAX_LIST_ITEMS)) {
+      const summary = task.progressSummary?.trim() || task.prompt;
+      elements.push(
+        markdown(
+          `**${displayText(task.projectName, 32)} · ${displayText(task.state, 20)}**\n${displayText(summary, 120)}\n_${displayText(task.updatedAt, 32)} · ${displayText(task.id, 12)}_`,
+        ),
+      );
+    }
+  }
+  elements.push(markdown(`第 ${page + 1} / ${totalPages} 页`));
+  const pageActions: Array<Record<string, unknown>> = [];
+  if (page > 0) {
+    pageActions.push(
+      button(
+        "上一页",
+        action({
+          version: CARD_VERSION,
+          action: "task.list",
+          ...(input.project ? { projectId: input.project.id } : {}),
+          page: page - 1,
+        }),
+      ),
+    );
+  }
+  if (page + 1 < totalPages) {
+    pageActions.push(
+      button(
+        "下一页",
+        action({
+          version: CARD_VERSION,
+          action: "task.list",
+          ...(input.project ? { projectId: input.project.id } : {}),
+          page: page + 1,
+        }),
+      ),
+    );
+  }
+  if (pageActions.length) elements.push(actionRow(pageActions));
+  elements.push(
+    divider(),
+    actionRow([
+      button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" })),
+      button(
+        "刷新任务",
+        action({
+          version: CARD_VERSION,
+          action: "task.list",
+          ...(input.project ? { projectId: input.project.id } : {}),
+          page,
+        }),
+      ),
+    ]),
+  );
+  return card(input.project ? "项目任务中心" : "全局任务中心", elements);
 }

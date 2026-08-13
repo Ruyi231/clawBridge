@@ -310,4 +310,46 @@ describe("SQLite migration contract", () => {
       rmSync(temporaryDirectory, { recursive: true, force: true });
     }
   });
+
+  it("adds version 8 task progress fields with safe empty defaults", () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-progress-migration-"));
+    const databasePath = path.join(temporaryDirectory, "bridge.db");
+    let bridgeDatabase: BridgeDatabase | undefined;
+    try {
+      const legacy = new Database(databasePath);
+      legacy.exec(`
+        CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+        INSERT INTO schema_migrations(version, applied_at)
+        VALUES(1,'x'),(2,'x'),(3,'x'),(4,'x'),(5,'x'),(6,'x'),(7,'x');
+        CREATE TABLE projects (
+          project_id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL, enabled INTEGER NOT NULL
+        );
+        INSERT INTO projects VALUES('demo','Demo','D:/demo',1);
+        CREATE TABLE tasks (
+          task_id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, message_id TEXT NOT NULL,
+          chat_id TEXT NOT NULL, project_id TEXT NOT NULL, prompt TEXT NOT NULL, state TEXT NOT NULL,
+          thread_id TEXT, reply_to_message_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error TEXT
+        );
+        INSERT INTO tasks VALUES('task-1','event-1','message-1','chat-1','demo','任务','queued',NULL,NULL,'x','x',NULL);
+      `);
+      legacy.close();
+
+      bridgeDatabase = new BridgeDatabase(databasePath);
+      expect(bridgeDatabase.getTask("task-1")).toMatchObject({
+        progressText: "",
+        progressSummary: null,
+      });
+      bridgeDatabase.close();
+      bridgeDatabase = undefined;
+
+      const migrated = new Database(databasePath, { readonly: true });
+      expect(
+        migrated.prepare("SELECT version FROM schema_migrations WHERE version=8").get(),
+      ).toEqual({ version: 8 });
+      migrated.close();
+    } finally {
+      bridgeDatabase?.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
 });

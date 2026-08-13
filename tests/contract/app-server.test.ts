@@ -13,17 +13,22 @@ describe("Codex App Server JSONL contract", () => {
       requestTimeoutMs: 2_000,
       turnTimeoutMs: 2_000,
     });
+    const progress: string[] = [];
     const result = await client.runTurn({
       cwd: process.cwd(),
       prompt: "hello",
       approvalPolicy: "onRequest",
       sandbox: "workspaceWrite",
+      onProgress: (event) => {
+        if (event.type === "assistantDelta") progress.push(event.delta);
+      },
     });
     expect(result).toEqual({
       threadId: "thread-test",
       turnId: "turn-test",
       finalText: "fake result",
     });
+    expect(progress).toEqual(["fake ", "result"]);
 
     await expect(client.listThreads({ cwd: process.cwd(), limit: 10 })).resolves.toEqual([
       expect.objectContaining({ id: "thread-test", status: "notLoaded", cwd: process.cwd() }),

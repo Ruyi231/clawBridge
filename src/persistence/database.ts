@@ -102,6 +102,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   state TEXT NOT NULL,
   thread_id TEXT,
   reply_to_message_id TEXT,
+  progress_text TEXT NOT NULL DEFAULT '',
+  progress_summary TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   error TEXT
@@ -244,6 +246,8 @@ interface TaskRow {
   state: TaskState;
   thread_id: string | null;
   reply_to_message_id: string | null;
+  progress_text: string;
+  progress_summary: string | null;
   created_at: string;
   updated_at: string;
   error: string | null;
@@ -276,6 +280,8 @@ function toTask(row: TaskRow): TaskRecord {
     state: row.state,
     threadId: row.thread_id,
     replyToMessageId: row.reply_to_message_id,
+    progressText: row.progress_text,
+    progressSummary: row.progress_summary,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     error: row.error,
@@ -402,6 +408,7 @@ export class BridgeDatabase {
       .prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(6, ?)")
       .run(new Date().toISOString());
     this.migrateTaskReplyRouting();
+    this.migrateTaskProgress();
   }
 
   close(): void {
@@ -1193,6 +1200,24 @@ export class BridgeDatabase {
       });
   }
 
+  updateTaskProgress(taskId: string, progressText: string, progressSummary?: string | null): void {
+    this.database
+      .prepare("UPDATE tasks SET progress_text=?, progress_summary=?, updated_at=? WHERE task_id=?")
+      .run(progressText, progressSummary ?? null, new Date().toISOString(), taskId);
+  }
+
+  listTasks(options: { projectId?: string; limit?: number } = {}): TaskRecord[] {
+    const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
+    const rows = options.projectId
+      ? (this.database
+          .prepare("SELECT * FROM tasks WHERE project_id=? ORDER BY created_at DESC LIMIT ?")
+          .all(options.projectId, limit) as TaskRow[])
+      : (this.database
+          .prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?")
+          .all(limit) as TaskRow[]);
+    return rows.map(toTask);
+  }
+
   interruptRunningTasks(): number {
     return this.database
       .prepare(
@@ -1655,6 +1680,27 @@ export class BridgeDatabase {
     }
     this.database
       .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(7, ?)")
+      .run(new Date().toISOString());
+  }
+
+  private migrateTaskProgress(): void {
+    const applied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 8")
+      .get();
+    if (applied) return;
+    const columns = new Set(
+      (this.database.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!columns.has("progress_text")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN progress_text TEXT NOT NULL DEFAULT ''");
+    }
+    if (!columns.has("progress_summary")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN progress_summary TEXT");
+    }
+    this.database
+      .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(8, ?)")
       .run(new Date().toISOString());
   }
 }

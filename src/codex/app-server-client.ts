@@ -108,6 +108,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
     approvalPolicy: "unlessTrusted" | "onRequest" | "never";
     sandbox: "readOnly" | "workspaceWrite";
     onStarted?: (ids: { threadId: string; turnId: string }) => void;
+    onProgress?: (event: import("./protocol-types.js").NormalizedCodexEvent) => void;
   }): Promise<CodexTurnResult> {
     await this.start();
     const approvalPolicy = toWireApprovalPolicy(input.approvalPolicy);
@@ -147,7 +148,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
     }
 
     const waiterAbort = new AbortController();
-    const turnCompletion = this.waitForTurn(threadId, turnId, waiterAbort.signal);
+    const turnCompletion = this.waitForTurn(threadId, turnId, waiterAbort.signal, input.onProgress);
     // Attach a rejection handler immediately so a synchronous callback failure cannot create an
     // unhandled rejection while the best-effort interrupt request is in flight.
     void turnCompletion.catch(() => undefined);
@@ -536,7 +537,12 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
     this.emit("message", message);
   }
 
-  private waitForTurn(threadId: string, turnId: string, signal?: AbortSignal): Promise<string> {
+  private waitForTurn(
+    threadId: string,
+    turnId: string,
+    signal?: AbortSignal,
+    onProgress?: (event: import("./protocol-types.js").NormalizedCodexEvent) => void,
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
       let finalText = "";
       let finished = false;
@@ -567,6 +573,8 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
         const params = message.params as Record<string, unknown> | undefined;
         const ids = extractNotificationIds(params);
         if (ids.threadId !== threadId || ids.turnId !== turnId) return;
+        const progress = normalizeCodexEvent(message);
+        if (progress) onProgress?.(progress);
         if (message.method === "item/completed") finalText = extractAgentText(params) ?? finalText;
         if (message.method === "turn/completed") {
           const completion = extractTurnCompletion(params);

@@ -69,6 +69,12 @@ export type CodexThreadUnsubscribeStatus = "notLoaded" | "notSubscribed" | "unsu
 
 export type NormalizedCodexEvent =
   | {
+      type: "assistantDelta";
+      threadId?: string;
+      turnId?: string;
+      delta: string;
+    }
+  | {
       type: "plan";
       threadId?: string;
       turnId?: string;
@@ -99,6 +105,7 @@ export interface CodexRunner {
     approvalPolicy: "unlessTrusted" | "onRequest" | "never";
     sandbox: "readOnly" | "workspaceWrite";
     onStarted?: (ids: { threadId: string; turnId: string }) => void;
+    onProgress?: (event: NormalizedCodexEvent) => void;
   }): Promise<CodexTurnResult>;
   startThread(input: CodexThreadStartInput): Promise<CodexThreadSummary>;
   listThreads(input: CodexThreadListInput): Promise<CodexThreadSummary[]>;

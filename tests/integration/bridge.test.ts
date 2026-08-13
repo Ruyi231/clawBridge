@@ -23,6 +23,12 @@ class FakeChannel implements ChannelAdapter {
     displayName: `[Codex] ${input.projectName}`,
   }));
   readonly createProjectTopic = vi.fn(async () => ({ topicRootId: "topic-created-thread" }));
+  readonly startTaskStream = vi.fn(async () => ({
+    streamId: "stream-task-1",
+    messageId: "message-stream-1",
+  }));
+  readonly updateTaskStream = vi.fn(async () => undefined);
+  readonly finishTaskStream = vi.fn(async () => undefined);
 
   constructor(options: { failures?: number; blockFirstSend?: boolean } = {}) {
     this.remainingFailures = options.failures ?? 0;
@@ -364,6 +370,54 @@ describe("Bridge vertical slice", () => {
         header: { title: { content: "ClawBridge 控制台" } },
       },
     });
+  });
+
+  it("opens global and project task centers from the control card", async () => {
+    const channel = new FakeChannel();
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.enqueue(
+      {
+        eventId: "task-center-event",
+        messageId: "task-center-message",
+        chatId: "chat-owner",
+        chatType: "p2p",
+        senderOpenId: "owner",
+        text: "实现任务中心",
+        receivedAt: new Date().toISOString(),
+      },
+      "demo",
+    );
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/menu", "task-center-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+
+    await channel.receiveCard({ version: 1, action: "task.list" }, "task-center-global");
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some((message) => message.kind === "card" && message.text === "全局任务中心"),
+      ).toBe(true),
+    );
+    await channel.receiveCard(
+      { version: 1, action: "task.list", projectId: "demo" },
+      "task-center-project",
+    );
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some((message) => message.kind === "card" && message.text === "项目任务中心"),
+      ).toBe(true),
+    );
   });
 
   it("does not issue an interactive card into a group chat", async () => {
