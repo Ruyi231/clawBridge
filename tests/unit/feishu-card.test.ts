@@ -82,16 +82,18 @@ describe("Feishu card rendering", () => {
       "thread.new",
       "task.list",
       "task.list",
+      "model.list",
       "menu.refresh",
       "chat.close",
       "task.stop",
     ]);
     const actionRows = card.elements.filter((element) => element.tag === "action");
-    expect(actionRows).toHaveLength(5);
+    expect(actionRows).toHaveLength(6);
     expect(actionRows.map((row) => row.layout)).toEqual([
       "bisected",
       "bisected",
       "bisected",
+      "flow",
       "bisected",
       "flow",
     ]);
@@ -103,6 +105,7 @@ describe("Feishu card rendering", () => {
       ["选择项目", "选择对话"],
       ["项目群", "新对话"],
       ["全部任务", "项目任务"],
+      ["模型设置"],
       ["刷新", "交还桌面"],
       ["停止任务"],
     ]);

@@ -31,6 +31,7 @@ export interface InboundCardAction {
   senderOpenId: string;
   value: Record<string, unknown>;
   option?: string | undefined;
+  formValue?: Record<string, unknown> | undefined;
   receivedAt: string;
 }
 
@@ -48,6 +49,8 @@ export interface TaskRecord {
   replyToMessageId: string | null;
   progressText: string;
   progressSummary: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
   createdAt: string;
   updatedAt: string;
   error: string | null;

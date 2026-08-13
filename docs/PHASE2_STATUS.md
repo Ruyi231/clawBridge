@@ -62,6 +62,14 @@
 - 流式泵按约 400 ms 合并快速增量，保证 API 更新串行；最终文本会在关闭前强制 flush
 - 流式能力是增强路径：创建、增量更新或最终关闭失败只记录脱敏警告，不替代持久 outbox 的最终成功/失败消息
 
+### ClawBridge 2.0-C：项目创建与对话模型设置
+
+- 项目列表提供“新建项目”表单；服务端仅接受 `form_value.projectName`，校验长度和 Windows 路径保留字符后生成内部 ID，并复用原有 allowedRoots、开关和 realpath 安全策略
+- App Server 客户端使用本机 schema 中的稳定 `model/list`，分页读取非隐藏模型；`turn/start` 通过 `model` 和 `effort` 覆盖当前回合及后续回合
+- SQLite v9 为每个 Codex 对话保存模型和推理强度；普通任务入队时将二者复制到 task 快照，保证排队期间修改设置不会重定向旧任务
+- 模型和推理强度回调会重新查询当前 Codex 模型目录，并验证项目、当前对话、模型及受支持 effort，拒绝过期卡片和伪造选项
+- 模型卡、新建项目表单已通过本地协议、数据库、渲染和 Bridge 集成测试；真实手机端仍需验证飞书客户端的 `form_submit` 展示与回传
+
 方法语义参考 [OpenAI 官方 Codex App Server 文档](https://developers.openai.com/codex/app-server)，未依赖实验性的对话分页接口。实际 JSON-RPC wire 字段和枚举以本机 Codex CLI `0.147.0` 运行 `codex app-server generate-json-schema` 生成的 schema 为当前基线，并已用同一二进制完成真实验证。
 
 2026-08-11 的 App Server smoke 覆盖 `initialize`、最小只读回合、新建、命名、历史读取、未归档列表、归档列表、恢复和最终再次归档，所有断言均通过。测试对话最终保持归档。该结论不代表跨版本兼容，也不代表飞书中的旧 Bridge 进程已经重新加载本次构建。

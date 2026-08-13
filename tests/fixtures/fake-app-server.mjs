@@ -166,6 +166,29 @@ input.on("line", (line) => {
       });
     }
   }
+  if (message.method === "model/list") {
+    send({
+      id: message.id,
+      result: {
+        data: [
+          {
+            id: "gpt-test",
+            model: "gpt-test",
+            displayName: "GPT Test",
+            description: "Test model",
+            hidden: false,
+            isDefault: true,
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: [
+              { reasoningEffort: "low", description: "Fast" },
+              { reasoningEffort: "medium", description: "Balanced" },
+            ],
+          },
+        ],
+        nextCursor: null,
+      },
+    });
+  }
   if (message.method === "turn/interrupt") {
     if (failInterrupt) {
       send({ id: message.id, error: { code: -32001, message: "interrupt failed" } });
@@ -184,6 +207,13 @@ input.on("line", (line) => {
       message.params.sandboxPolicy?.networkAccess === false;
     if (!validSandboxPolicy) {
       send({ id: message.id, error: { code: -32602, message: "invalid turn policy" } });
+      return;
+    }
+    if (
+      (message.params.model !== undefined && message.params.model !== "gpt-test") ||
+      (message.params.effort !== undefined && message.params.effort !== "medium")
+    ) {
+      send({ id: message.id, error: { code: -32602, message: "invalid model override" } });
       return;
     }
     if (failTurnStart) {

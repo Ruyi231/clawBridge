@@ -591,4 +591,30 @@ describe("project and thread persistence", () => {
     ]);
     expect(database.listProjectThreads("demo", { includeArchived: true })).toHaveLength(2);
   });
+
+  it("persists per-thread model settings and snapshots them into queued tasks", () => {
+    database.upsertThread({ threadId: "thread-model", projectId: "demo", title: "Model test" });
+    expect(database.setThreadExecutionSettings("thread-model", "gpt-test", "medium")).toMatchObject(
+      { model: "gpt-test", reasoningEffort: "medium" },
+    );
+    expect(database.getThreadExecutionSettings("thread-model")).toMatchObject({
+      model: "gpt-test",
+      reasoningEffort: "medium",
+    });
+    const task = database.enqueue(
+      {
+        eventId: "model-event",
+        messageId: "model-message",
+        chatId: "chat-model",
+        chatType: "p2p",
+        senderOpenId: "owner",
+        text: "run with selected model",
+        receivedAt: new Date().toISOString(),
+      },
+      "demo",
+      "thread-model",
+      { model: "gpt-test", reasoningEffort: "medium" },
+    );
+    expect(task).toMatchObject({ model: "gpt-test", reasoningEffort: "medium" });
+  });
 });

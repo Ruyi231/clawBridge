@@ -14,6 +14,7 @@ import {
 } from "./event-normalizer.js";
 import type {
   CodexRunner,
+  CodexModelInfo,
   CodexThreadDetails,
   CodexThreadListInput,
   CodexThreadStartInput,
@@ -107,6 +108,8 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
     threadId?: string | null;
     approvalPolicy: "unlessTrusted" | "onRequest" | "never";
     sandbox: "readOnly" | "workspaceWrite";
+    model?: string;
+    reasoningEffort?: string;
     onStarted?: (ids: { threadId: string; turnId: string }) => void;
     onProgress?: (event: import("./protocol-types.js").NormalizedCodexEvent) => void;
   }): Promise<CodexTurnResult> {
@@ -135,6 +138,8 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
           input.sandbox === "workspaceWrite"
             ? { type: "workspaceWrite", writableRoots: [input.cwd], networkAccess: false }
             : { type: "readOnly", networkAccess: false },
+        ...(input.model ? { model: input.model } : {}),
+        ...(input.reasoningEffort ? { effort: input.reasoningEffort } : {}),
       });
       const extractedTurnId = extractIds(startedTurn).turnId;
       if (!extractedTurnId)
@@ -237,6 +242,66 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
         cause: error,
       });
     }
+  }
+
+  async listModels(): Promise<CodexModelInfo[]> {
+    await this.start();
+    const models: CodexModelInfo[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const result = await this.request("model/list", {
+        limit: 100,
+        includeHidden: false,
+        ...(cursor ? { cursor } : {}),
+      });
+      if (typeof result !== "object" || result === null || !("data" in result)) {
+        throw new BridgeError("CODEX_PROTOCOL_ERROR", "Invalid model/list response", false);
+      }
+      const data = (result as { data?: unknown }).data;
+      if (!Array.isArray(data)) {
+        throw new BridgeError("CODEX_PROTOCOL_ERROR", "Invalid model/list response", false);
+      }
+      for (const value of data) {
+        if (typeof value !== "object" || value === null) continue;
+        const model = value as Record<string, unknown>;
+        const efforts = Array.isArray(model.supportedReasoningEfforts)
+          ? model.supportedReasoningEfforts.flatMap((entry) => {
+              if (typeof entry !== "object" || entry === null) return [];
+              const option = entry as Record<string, unknown>;
+              return typeof option.reasoningEffort === "string" &&
+                typeof option.description === "string"
+                ? [{ reasoningEffort: option.reasoningEffort, description: option.description }]
+                : [];
+            })
+          : [];
+        if (
+          typeof model.id !== "string" ||
+          typeof model.model !== "string" ||
+          typeof model.displayName !== "string" ||
+          typeof model.description !== "string" ||
+          typeof model.isDefault !== "boolean" ||
+          typeof model.defaultReasoningEffort !== "string"
+        ) {
+          continue;
+        }
+        models.push({
+          id: model.id,
+          model: model.model,
+          displayName: model.displayName,
+          description: model.description,
+          isDefault: model.isDefault,
+          defaultReasoningEffort: model.defaultReasoningEffort,
+          supportedReasoningEfforts: efforts,
+        });
+      }
+      cursor =
+        "nextCursor" in result &&
+        (typeof (result as { nextCursor?: unknown }).nextCursor === "string" ||
+          (result as { nextCursor?: unknown }).nextCursor === null)
+          ? ((result as { nextCursor?: string | null }).nextCursor ?? null)
+          : null;
+    } while (cursor);
+    return models;
   }
 
   async readThread(threadId: string): Promise<CodexThreadSummary> {

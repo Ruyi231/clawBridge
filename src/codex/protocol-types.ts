@@ -65,6 +65,21 @@ export interface CodexThreadStartInput {
   sandbox: "readOnly" | "workspaceWrite";
 }
 
+export interface CodexReasoningEffortOption {
+  reasoningEffort: string;
+  description: string;
+}
+
+export interface CodexModelInfo {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: CodexReasoningEffortOption[];
+}
+
 export type CodexThreadUnsubscribeStatus = "notLoaded" | "notSubscribed" | "unsubscribed";
 
 export type NormalizedCodexEvent =
@@ -104,9 +119,12 @@ export interface CodexRunner {
     threadId?: string | null;
     approvalPolicy: "unlessTrusted" | "onRequest" | "never";
     sandbox: "readOnly" | "workspaceWrite";
+    model?: string;
+    reasoningEffort?: string;
     onStarted?: (ids: { threadId: string; turnId: string }) => void;
     onProgress?: (event: NormalizedCodexEvent) => void;
   }): Promise<CodexTurnResult>;
+  listModels(): Promise<CodexModelInfo[]>;
   startThread(input: CodexThreadStartInput): Promise<CodexThreadSummary>;
   listThreads(input: CodexThreadListInput): Promise<CodexThreadSummary[]>;
   readThread(threadId: string): Promise<CodexThreadSummary>;

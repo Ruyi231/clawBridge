@@ -45,6 +45,7 @@ const cardContextSchema = z.object({
 const cardActionSchema = z.object({
   value: z.record(z.string(), z.unknown()),
   option: z.string().min(1).optional(),
+  form_value: z.record(z.string(), z.unknown()).optional(),
 });
 
 const cardEnvelopeSchema = z.object({
@@ -113,6 +114,7 @@ export function parseFeishuCardAction(payload: unknown): InboundCardAction {
     senderOpenId: event.operator.open_id,
     value: event.action.value,
     ...(event.action.option ? { option: event.action.option } : {}),
+    ...(event.action.form_value ? { formValue: event.action.form_value } : {}),
     receivedAt: timestamp ? new Date(Number(timestamp)).toISOString() : new Date().toISOString(),
   };
 }

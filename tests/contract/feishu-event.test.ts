@@ -137,6 +137,7 @@ describe("Feishu card action contract", () => {
           tag: "select_static",
           value: { action: "project_use", projectId: "bridge-dev" },
           option: "bridge-dev",
+          form_value: { projectName: "robot-demo" },
         },
       }),
     ).toMatchObject({
@@ -146,6 +147,7 @@ describe("Feishu card action contract", () => {
       senderOpenId: "ou-sdk-owner",
       value: { action: "project_use", projectId: "bridge-dev" },
       option: "bridge-dev",
+      formValue: { projectName: "robot-demo" },
     });
   });
 

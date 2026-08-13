@@ -16,6 +16,17 @@ const threadIdSchema = z
   .max(256)
   .regex(/^[A-Za-z0-9._:-]+$/, "Invalid internal thread ID");
 
+const modelIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9@._:/-]+$/);
+const effortSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9._-]+$/);
+
 const actionSchemas = [
   z.object({ version: z.literal(CARD_VERSION), action: z.literal("menu.refresh") }).strict(),
   z
@@ -80,6 +91,35 @@ const actionSchemas = [
     .strict(),
   z.object({ version: z.literal(CARD_VERSION), action: z.literal("task.stop") }).strict(),
   z.object({ version: z.literal(CARD_VERSION), action: z.literal("chat.close") }).strict(),
+  z.object({ version: z.literal(CARD_VERSION), action: z.literal("project.create.show") }).strict(),
+  z.object({ version: z.literal(CARD_VERSION), action: z.literal("project.create") }).strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
+      action: z.literal("model.list"),
+      projectId: projectIdSchema,
+      threadId: threadIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
+      action: z.literal("model.use"),
+      projectId: projectIdSchema,
+      threadId: threadIdSchema,
+      model: modelIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
+      action: z.literal("reasoning.use"),
+      projectId: projectIdSchema,
+      threadId: threadIdSchema,
+      model: modelIdSchema,
+      reasoningEffort: effortSchema,
+    })
+    .strict(),
 ] as const;
 
 const cardActionSchema = z.discriminatedUnion("action", actionSchemas);
@@ -146,6 +186,21 @@ export interface TaskCenterCardInput {
   project?: CardProject | null;
   page?: number;
   totalPages?: number;
+}
+
+export interface ModelListCardInput {
+  project: CardProject;
+  thread: CardThread;
+  models: Array<{
+    model: string;
+    displayName: string;
+    description: string;
+    isDefault: boolean;
+    defaultReasoningEffort: string;
+    supportedReasoningEfforts: Array<{ reasoningEffort: string; description: string }>;
+  }>;
+  selectedModel?: string | null;
+  selectedReasoningEffort?: string | null;
 }
 
 export interface FeishuCard {
@@ -305,6 +360,21 @@ export function renderHomeCard(input: HomeCardInput): FeishuCard {
           action({ version: CARD_VERSION, action: "task.list", projectId: input.project.id }),
         ),
       ]),
+      ...(input.thread
+        ? [
+            actionRow([
+              button(
+                "模型设置",
+                action({
+                  version: CARD_VERSION,
+                  action: "model.list",
+                  projectId: input.project.id,
+                  threadId: input.thread.id,
+                }),
+              ),
+            ]),
+          ]
+        : []),
       actionRow([
         button("刷新", action({ version: CARD_VERSION, action: "menu.refresh" })),
         button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" })),
@@ -368,8 +438,103 @@ export function renderProjectListCard(input: ProjectListCardInput): FeishuCard {
       button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" })),
       button("刷新项目", projectListAction(page)),
     ]),
+    actionRow([
+      button(
+        "新建项目",
+        action({ version: CARD_VERSION, action: "project.create.show" }),
+        "primary",
+      ),
+    ]),
   );
   return card("选择项目", elements);
+}
+
+export function renderProjectCreateCard(): FeishuCard {
+  return card("新建项目", [
+    markdown("输入项目名称。ClawBridge 会在已授权的项目根目录中创建安全目录。"),
+    {
+      tag: "form",
+      name: "project_create",
+      elements: [
+        {
+          tag: "input",
+          name: "projectName",
+          label: { tag: "plain_text", content: "项目名称" },
+          placeholder: { tag: "plain_text", content: "例如：robot-demo" },
+          required: true,
+          max_length: 80,
+        },
+        {
+          ...button(
+            "创建并选择",
+            action({ version: CARD_VERSION, action: "project.create" }),
+            "primary",
+          ),
+          name: "project_create_submit",
+          action_type: "form_submit",
+          complex_interaction: true,
+        },
+      ],
+    },
+    actionRow([button("取消", projectListAction())]),
+  ]);
+}
+
+export function renderModelListCard(input: ModelListCardInput): FeishuCard {
+  const elements: Array<Record<string, unknown>> = [
+    markdown(
+      `**对话：** #${input.thread.localNumber} ${displayText(input.thread.title || "未命名", 48)}`,
+    ),
+    markdown(
+      `**当前模型：** ${displayText(input.selectedModel || "Codex 默认", 48)}\n**推理强度：** ${displayText(input.selectedReasoningEffort || "模型默认", 32)}`,
+    ),
+    divider(),
+  ];
+  for (const model of input.models.slice(0, MAX_LIST_ITEMS)) {
+    const selected = model.model === input.selectedModel;
+    elements.push(
+      markdown(
+        `**${displayText(model.displayName, 52)}**${model.isDefault ? " · 默认" : ""}\n${displayText(model.description, 100)}`,
+      ),
+      actionRow([
+        button(
+          selected ? "当前模型" : "选择模型",
+          action({
+            version: CARD_VERSION,
+            action: "model.use",
+            projectId: input.project.id,
+            threadId: input.thread.id,
+            model: model.model,
+          }),
+          selected ? "primary" : "default",
+        ),
+      ]),
+    );
+    if (selected) {
+      const efforts = model.supportedReasoningEfforts.slice(0, 4).map((effort) =>
+        button(
+          effort.reasoningEffort === input.selectedReasoningEffort
+            ? `✓ ${effort.reasoningEffort}`
+            : effort.reasoningEffort,
+          action({
+            version: CARD_VERSION,
+            action: "reasoning.use",
+            projectId: input.project.id,
+            threadId: input.thread.id,
+            model: model.model,
+            reasoningEffort: effort.reasoningEffort,
+          }),
+          effort.reasoningEffort === input.selectedReasoningEffort ? "primary" : "default",
+        ),
+      );
+      if (efforts.length) elements.push(actionRow(efforts));
+    }
+  }
+  elements.push(
+    divider(),
+    actionRow([button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" }))]),
+  );
+  return card("模型与推理强度", elements);
 }
 
 export function renderThreadListCard(input: ThreadListCardInput): FeishuCard {

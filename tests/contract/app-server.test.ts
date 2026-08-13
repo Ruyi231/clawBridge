@@ -6,6 +6,34 @@ let client: CodexAppServerClient | undefined;
 afterEach(async () => client?.stop());
 
 describe("Codex App Server JSONL contract", () => {
+  it("lists models and sends model plus reasoning effort to turn/start", async () => {
+    client = new CodexAppServerClient({
+      command: process.execPath,
+      args: [path.resolve("tests/fixtures/fake-app-server.mjs")],
+      requestTimeoutMs: 2_000,
+      turnTimeoutMs: 2_000,
+    });
+    await expect(client.listModels()).resolves.toEqual([
+      expect.objectContaining({
+        model: "gpt-test",
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: [
+          { reasoningEffort: "low", description: "Fast" },
+          { reasoningEffort: "medium", description: "Balanced" },
+        ],
+      }),
+    ]);
+    await expect(
+      client.runTurn({
+        cwd: process.cwd(),
+        prompt: "hello",
+        approvalPolicy: "onRequest",
+        sandbox: "workspaceWrite",
+        model: "gpt-test",
+        reasoningEffort: "medium",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ finalText: "fake result" }));
+  });
   it("classifies the implicit thread created by runTurn as a user thread", async () => {
     client = new CodexAppServerClient({
       command: process.execPath,

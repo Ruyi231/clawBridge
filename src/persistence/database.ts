@@ -104,9 +104,18 @@ CREATE TABLE IF NOT EXISTS tasks (
   reply_to_message_id TEXT,
   progress_text TEXT NOT NULL DEFAULT '',
   progress_summary TEXT,
+  model TEXT,
+  reasoning_effort TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS thread_execution_settings (
+  thread_id TEXT PRIMARY KEY REFERENCES thread_index(thread_id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_state_created ON tasks(state, created_at);
@@ -191,6 +200,13 @@ export interface FeishuThreadRouteRecord {
   updatedAt: string;
 }
 
+export interface ThreadExecutionSettingsRecord {
+  threadId: string;
+  model: string;
+  reasoningEffort: string;
+  updatedAt: string;
+}
+
 interface ProjectRow {
   project_id: string;
   name: string;
@@ -248,6 +264,8 @@ interface TaskRow {
   reply_to_message_id: string | null;
   progress_text: string;
   progress_summary: string | null;
+  model: string | null;
+  reasoning_effort: string | null;
   created_at: string;
   updated_at: string;
   error: string | null;
@@ -282,6 +300,8 @@ function toTask(row: TaskRow): TaskRecord {
     replyToMessageId: row.reply_to_message_id,
     progressText: row.progress_text,
     progressSummary: row.progress_summary,
+    model: row.model,
+    reasoningEffort: row.reasoning_effort,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     error: row.error,
@@ -409,6 +429,7 @@ export class BridgeDatabase {
       .run(new Date().toISOString());
     this.migrateTaskReplyRouting();
     this.migrateTaskProgress();
+    this.migrateThreadExecutionSettings();
   }
 
   close(): void {
@@ -1077,7 +1098,12 @@ export class BridgeDatabase {
     };
   }
 
-  enqueue(message: InboundMessage, projectId: string, threadId?: string | null): TaskRecord | null {
+  enqueue(
+    message: InboundMessage,
+    projectId: string,
+    threadId?: string | null,
+    execution?: { model: string; reasoningEffort: string } | null,
+  ): TaskRecord | null {
     const now = new Date().toISOString();
     const id = randomUUID();
     const result = this.database
@@ -1085,8 +1111,8 @@ export class BridgeDatabase {
         `
       INSERT OR IGNORE INTO tasks(
         task_id, event_id, message_id, chat_id, project_id, prompt, state, thread_id,
-        reply_to_message_id, created_at, updated_at
-      ) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+        reply_to_message_id, model, reasoning_effort, created_at, updated_at
+      ) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
     `,
       )
       .run(
@@ -1098,11 +1124,48 @@ export class BridgeDatabase {
         message.text,
         threadId ?? null,
         message.topicRootId ?? null,
+        execution?.model ?? null,
+        execution?.reasoningEffort ?? null,
         now,
         now,
       );
     if (result.changes === 0) return null;
     return this.getTask(id) ?? null;
+  }
+
+  getThreadExecutionSettings(threadId: string): ThreadExecutionSettingsRecord | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM thread_execution_settings WHERE thread_id=?")
+      .get(threadId) as
+      | { thread_id: string; model: string; reasoning_effort: string; updated_at: string }
+      | undefined;
+    return row
+      ? {
+          threadId: row.thread_id,
+          model: row.model,
+          reasoningEffort: row.reasoning_effort,
+          updatedAt: row.updated_at,
+        }
+      : undefined;
+  }
+
+  setThreadExecutionSettings(
+    threadId: string,
+    model: string,
+    reasoningEffort: string,
+  ): ThreadExecutionSettingsRecord {
+    const updatedAt = new Date().toISOString();
+    this.database
+      .prepare(
+        `INSERT INTO thread_execution_settings(thread_id,model,reasoning_effort,updated_at)
+         VALUES(?,?,?,?)
+         ON CONFLICT(thread_id) DO UPDATE SET
+           model=excluded.model,
+           reasoning_effort=excluded.reasoning_effort,
+           updated_at=excluded.updated_at`,
+      )
+      .run(threadId, model, reasoningEffort, updatedAt);
+    return { threadId, model, reasoningEffort, updatedAt };
   }
 
   getTask(taskId: string): TaskRecord | undefined {
@@ -1701,6 +1764,31 @@ export class BridgeDatabase {
     }
     this.database
       .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(8, ?)")
+      .run(new Date().toISOString());
+  }
+
+  private migrateThreadExecutionSettings(): void {
+    const applied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 9")
+      .get();
+    if (applied) return;
+    const columns = new Set(
+      (this.database.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!columns.has("model")) this.database.exec("ALTER TABLE tasks ADD COLUMN model TEXT");
+    if (!columns.has("reasoning_effort")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN reasoning_effort TEXT");
+    }
+    this.database.exec(`CREATE TABLE IF NOT EXISTS thread_execution_settings (
+      thread_id TEXT PRIMARY KEY REFERENCES thread_index(thread_id) ON DELETE CASCADE,
+      model TEXT NOT NULL,
+      reasoning_effort TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`);
+    this.database
+      .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(9, ?)")
       .run(new Date().toISOString());
   }
 }

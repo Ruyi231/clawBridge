@@ -5,6 +5,8 @@ import type { ChannelAdapter } from "../channels/channel-adapter.js";
 import {
   parseCardAction,
   renderHomeCard,
+  renderModelListCard,
+  renderProjectCreateCard,
   renderProjectListCard,
   renderTaskCenterCard,
   renderThreadListCard,
@@ -329,7 +331,10 @@ export class Bridge {
       return;
     }
 
-    const task = database.enqueue(message, projectId, conversation.threadId);
+    const execution = conversation.threadId
+      ? database.getThreadExecutionSettings(conversation.threadId)
+      : undefined;
+    const task = database.enqueue(message, projectId, conversation.threadId, execution ?? null);
     if (!task) {
       logger.info({ eventId: message.eventId }, "Ignored duplicate event");
       return;
@@ -439,6 +444,8 @@ export class Bridge {
         threadId,
         approvalPolicy: config.codex.approvalPolicy,
         sandbox: config.codex.sandbox,
+        ...(task.model ? { model: task.model } : {}),
+        ...(task.reasoningEffort ? { reasoningEffort: task.reasoningEffort } : {}),
         onStarted: ({ threadId: startedThreadId, turnId }) => {
           activeThreadId = startedThreadId;
           database.upsertThread({
@@ -619,6 +626,22 @@ export class Bridge {
       case "project.list":
         await this.showProjectCard(event.chatId, action.page ?? 0);
         return;
+      case "project.create.show":
+        this.replyCard(event.chatId, renderProjectCreateCard(), "新建项目");
+        return;
+      case "project.create": {
+        const rawName = event.formValue?.projectName;
+        if (typeof rawName !== "string") throw new Error("请输入项目名称。");
+        const name = rawName.trim();
+        if (!name || name.length > 80 || /[\\/:*?"<>|\r\n]/.test(name)) {
+          throw new Error("项目名称需为 1–80 个字符，且不能包含路径保留字符。 ");
+        }
+        const projectId = `mobile-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}`;
+        const project = await this.projectManager.createProject(projectId, name);
+        this.dependencies.database.selectProject(event.chatId, project.id);
+        await this.openProjectSpace(event.chatId, event.senderOpenId, project.id);
+        return;
+      }
       case "project.use":
         await this.runProjectCommand(event.chatId, {
           group: "project",
@@ -666,6 +689,21 @@ export class Bridge {
         return;
       case "task.list":
         await this.showTaskCenter(event.chatId, action.projectId, action.page ?? 0);
+        return;
+      case "model.list":
+        await this.showModelCard(event.chatId, action.projectId, action.threadId);
+        return;
+      case "model.use":
+        await this.setModelSettings(event.chatId, action.projectId, action.threadId, action.model);
+        return;
+      case "reasoning.use":
+        await this.setModelSettings(
+          event.chatId,
+          action.projectId,
+          action.threadId,
+          action.model,
+          action.reasoningEffort,
+        );
         return;
       case "chat.close":
         await this.runChatClose(event.chatId);
@@ -833,6 +871,67 @@ export class Bridge {
       }),
       project ? "项目任务中心" : "全局任务中心",
     );
+  }
+
+  private async showModelCard(chatId: string, projectId: string, threadId: string): Promise<void> {
+    const { database, codex } = this.dependencies;
+    const conversation = database.getConversation(chatId);
+    if (conversation?.projectId !== projectId || conversation.threadId !== threadId) {
+      throw new Error("该卡片对应的项目或对话已不是当前选择，请返回控制台刷新。 ");
+    }
+    const project = database.getProject(projectId);
+    const thread = database.getProjectThread(projectId, threadId);
+    if (!project || !thread) throw new Error("当前对话不存在，请刷新控制台。 ");
+    this.assertNotStopping();
+    const models = await codex.listModels();
+    this.assertNotStopping();
+    const current = database.getThreadExecutionSettings(threadId);
+    const defaultModel = models.find((model) => model.isDefault) ?? models[0];
+    this.replyCard(
+      chatId,
+      renderModelListCard({
+        project: { id: project.id, name: project.name },
+        thread: {
+          id: thread.threadId,
+          projectId: thread.projectId,
+          localNumber: thread.localNumber,
+          title: thread.title,
+        },
+        models,
+        selectedModel: current?.model ?? defaultModel?.model ?? null,
+        selectedReasoningEffort:
+          current?.reasoningEffort ?? defaultModel?.defaultReasoningEffort ?? null,
+      }),
+      "模型与推理强度",
+    );
+  }
+
+  private async setModelSettings(
+    chatId: string,
+    projectId: string,
+    threadId: string,
+    requestedModel: string,
+    requestedEffort?: string,
+  ): Promise<void> {
+    const { database, codex } = this.dependencies;
+    const conversation = database.getConversation(chatId);
+    if (conversation?.projectId !== projectId || conversation.threadId !== threadId) {
+      throw new Error("该卡片已过期，请返回控制台重新打开模型设置。 ");
+    }
+    this.assertNotStopping();
+    const models = await codex.listModels();
+    this.assertNotStopping();
+    const model = models.find((entry) => entry.model === requestedModel);
+    if (!model) throw new Error("该模型当前不可用，请刷新模型列表。 ");
+    const existing = database.getThreadExecutionSettings(threadId);
+    const effort =
+      requestedEffort ??
+      (existing?.model === model.model ? existing.reasoningEffort : model.defaultReasoningEffort);
+    if (!model.supportedReasoningEfforts.some((entry) => entry.reasoningEffort === effort)) {
+      throw new Error("该推理强度不受当前模型支持，请重新选择。 ");
+    }
+    database.setThreadExecutionSettings(threadId, model.model, effort);
+    await this.showModelCard(chatId, projectId, threadId);
   }
 
   private async showThreadCard(

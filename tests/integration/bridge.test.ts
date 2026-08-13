@@ -99,6 +99,7 @@ class FakeChannel implements ChannelAdapter {
     eventId = "card-event-bridge-1",
     senderOpenId = "owner",
     messageId = this.latestCardMessageId(),
+    formValue?: Record<string, unknown>,
   ): Promise<void> {
     if (!this.callback) throw new Error("channel has not started");
     await this.callback({
@@ -109,6 +110,7 @@ class FakeChannel implements ChannelAdapter {
       chatType: "unknown",
       senderOpenId,
       value,
+      ...(formValue ? { formValue } : {}),
       receivedAt: new Date().toISOString(),
     });
   }
@@ -158,6 +160,17 @@ afterEach(async () => bridge?.stop());
 function fakeCodex(): CodexRunner {
   let createdThread = 0;
   return {
+    listModels: vi.fn(async () => [
+      {
+        id: "gpt-test",
+        model: "gpt-test",
+        displayName: "GPT Test",
+        description: "Test model",
+        isDefault: true,
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Balanced" }],
+      },
+    ]),
     runTurn: vi.fn(async (input: Parameters<CodexRunner["runTurn"]>[0]) => {
       input.onStarted?.({ threadId: "thread-bridge", turnId: "turn-bridge" });
       return {
@@ -637,6 +650,45 @@ describe("Bridge vertical slice", () => {
       expect(database.getConversation("chat-owner")?.threadId).toBe("thread-existing"),
     );
     expect(codex.readThread).toHaveBeenCalledWith("thread-existing");
+  });
+
+  it("selects a model and reasoning effort for the current thread", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.upsertThread({ threadId: "thread-model", projectId: "demo", title: "Model thread" });
+    database.selectProject("chat-owner", "demo");
+    database.setThread("chat-owner", "demo", "thread-model");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/menu", "model-menu");
+    await vi.waitFor(() => expect(channel.sent.some((item) => item.kind === "card")).toBe(true));
+    await channel.receiveCard(
+      {
+        version: 1,
+        action: "reasoning.use",
+        projectId: "demo",
+        threadId: "thread-model",
+        model: "gpt-test",
+        reasoningEffort: "medium",
+      },
+      "model-use",
+    );
+    await vi.waitFor(() =>
+      expect(database.getThreadExecutionSettings("thread-model")).toMatchObject({
+        model: "gpt-test",
+        reasoningEffort: "medium",
+      }),
+    );
   });
 
   it("deduplicates repeated card callback events", async () => {
