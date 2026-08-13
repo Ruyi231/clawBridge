@@ -7,6 +7,7 @@ export interface DesktopProjectRecord {
   name: string;
   rootPaths: string[];
   order: number;
+  assignedThreadIds: string[];
 }
 
 export interface DesktopProjectSnapshot {
@@ -26,6 +27,7 @@ export interface CodexDesktopProjectDiscoveryOptions {
 interface DesktopStateShape {
   "project-order": unknown;
   "local-projects": unknown;
+  "thread-project-assignments"?: unknown;
 }
 
 const maxSourceIdLength = 512;
@@ -49,6 +51,19 @@ function parseState(raw: string): DesktopProjectRecord[] {
   }
 
   const localProjects = state["local-projects"];
+  const assignments = isRecord(state["thread-project-assignments"])
+    ? state["thread-project-assignments"]
+    : {};
+  const assignedThreads = new Map<string, string[]>();
+  for (const [threadId, value] of Object.entries(assignments)) {
+    if (!/^[0-9a-f-]{16,64}$/i.test(threadId) || !isRecord(value)) continue;
+    const projectId = value.projectId;
+    if (typeof projectId !== "string" || !projectId || projectId.length > maxSourceIdLength)
+      continue;
+    const threads = assignedThreads.get(projectId) ?? [];
+    threads.push(threadId);
+    assignedThreads.set(projectId, threads);
+  }
   const projects: DesktopProjectRecord[] = [];
   const seen = new Set<string>();
 
@@ -95,6 +110,7 @@ function parseState(raw: string): DesktopProjectRecord[] {
       name: name.trim(),
       rootPaths: rootPaths.map((rootPath) => (rootPath as string).trim()),
       order,
+      assignedThreadIds: assignedThreads.get(sourceIdValue) ?? [],
     });
   }
 

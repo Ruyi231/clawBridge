@@ -80,6 +80,7 @@ export class Bridge {
   private readonly projectManager: ProjectManager;
   private desktopProjectOrder: string[] = [];
   private readonly desktopProjectIds = new Set<string>();
+  private readonly desktopThreadProjects = new Map<string, string>();
   private readonly projectNumbers = new Map<string, number>();
   private desktopSyncWarning: string | undefined;
   private desktopRefreshPromise: Promise<void> | undefined;
@@ -1396,7 +1397,7 @@ export class Bridge {
           }
           return;
         }
-        if (!(await this.threadBelongsToProject(savedSummary, projectRoot))) {
+        if (!(await this.threadBelongsToProject(savedSummary, projectRoot, project.id))) {
           database.selectProject(chatId, project.id);
           database.clearThread(chatId, project.id);
           this.reply(
@@ -1484,64 +1485,48 @@ export class Bridge {
       });
       let record: ThreadIndexRecord | undefined;
       try {
-        try {
-          await this.validateThreadProject(summary, projectRoot);
-          record = this.indexThread(project.id, summary, false);
-          database.setThread(chatId, project.id, summary.id);
-        } catch (error) {
-          let compensation = "已尝试将它归档";
-          if (this.stopping) {
-            compensation = "Bridge 正在停止，未重新启动 App Server 执行自动归档";
-          } else {
-            try {
-              await codex.archiveThread(summary.id);
-            } catch {
-              compensation = "自动归档也失败";
-            }
-          }
-          throw new Error(`Codex 已创建对话 ${summary.id}，但本地登记失败；${compensation}。`, {
-            cause: error,
-          });
-        }
-        if (command.title) {
+        await this.validateThreadProject(summary, projectRoot, project.id);
+        record = this.indexThread(project.id, summary, false);
+        database.setThread(chatId, project.id, summary.id);
+      } catch (error) {
+        let compensation = "已尝试将它归档";
+        if (this.stopping) {
+          compensation = "Bridge 正在停止，未重新启动 App Server 执行自动归档";
+        } else {
           try {
-            this.assertNotStopping();
-            await codex.nameThread(summary.id, command.title);
-            record = database.upsertThread({
-              threadId: summary.id,
-              projectId: project.id,
-              title: command.title,
-              lastSyncedAt: new Date().toISOString(),
-            });
-          } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            this.reply(
-              chatId,
-              `⚠️ 已创建并选择对话 #${record.localNumber}（${summary.id}），但命名失败：${detail}\n对话仍可正常使用，可稍后执行 /chat rename ${record.localNumber} <名称>。`,
-            );
-            return;
+            await codex.archiveThread(summary.id);
+          } catch {
+            compensation = "自动归档也失败";
           }
         }
-        this.reply(
-          chatId,
-          `✅ 已创建并选择对话 #${record.localNumber}：${record.title ?? "未命名对话"}\n后续普通消息会继续这个对话。`,
-        );
-        return;
-      } finally {
-        if (!this.stopping) {
-          const released = await this.releaseThreadSubscription(summary.id, {
-            context: "new chat",
-            maxMessageTails: 1,
-            allowQueuedTasks: false,
+        throw new Error(`Codex 已创建对话 ${summary.id}，但本地登记失败；${compensation}。`, {
+          cause: error,
+        });
+      }
+      if (command.title) {
+        try {
+          this.assertNotStopping();
+          await codex.nameThread(summary.id, command.title);
+          record = database.upsertThread({
+            threadId: summary.id,
+            projectId: project.id,
+            title: command.title,
+            lastSyncedAt: new Date().toISOString(),
           });
-          if (!released && record) {
-            this.reply(
-              chatId,
-              "⚠️ 新对话已经创建，但 Codex 会话自动释放失败。需要在 Desktop 打开时，请先执行 /chat close。",
-            );
-          }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          this.reply(
+            chatId,
+            `⚠️ 已创建并选择对话 #${record.localNumber}（${summary.id}），但命名失败：${detail}\n对话仍可正常使用，可稍后执行 /chat rename ${record.localNumber} <名称>。`,
+          );
+          return;
         }
       }
+      this.reply(
+        chatId,
+        `✅ 已创建并选择对话 #${record.localNumber}：${record.title ?? "未命名对话"}\n请直接发送第一条任务；首次任务完成后会自动释放给 Codex Desktop。`,
+      );
+      return;
     }
 
     if (command.action === "list") {
@@ -1589,7 +1574,7 @@ export class Bridge {
     if (command.action === "show") {
       this.assertNotStopping();
       const details = await codex.readThreadDetails(record.threadId, true);
-      await this.validateThreadProject(details, projectRoot);
+      await this.validateThreadProject(details, projectRoot, project.id);
       this.indexThread(project.id, details, record.archived);
       this.reply(chatId, this.renderThreadDetails(record, details));
       return;
@@ -1658,7 +1643,7 @@ export class Bridge {
     const restored = restoredResult.cwd
       ? restoredResult
       : await codex.readThread(restoredResult.id);
-    await this.validateThreadProject(restored, projectRoot);
+    await this.validateThreadProject(restored, projectRoot, project.id);
     const restoredRecord = this.indexThread(project.id, restored, false);
     this.reply(
       chatId,
@@ -1678,9 +1663,24 @@ export class Bridge {
     ];
     for (const result of await Promise.all(requests)) {
       for (const summary of result.threads) {
-        if (await this.threadBelongsToProject(summary, projectRoot)) {
+        if (await this.threadBelongsToProject(summary, projectRoot, project.id)) {
           this.indexThread(project.id, summary, result.archived);
         }
+      }
+    }
+    const assignedThreadIds = [...this.desktopThreadProjects.entries()]
+      .filter(([, assignedProjectId]) => assignedProjectId === project.id)
+      .map(([threadId]) => threadId);
+    for (const threadId of assignedThreadIds) {
+      try {
+        this.assertNotStopping();
+        const summary = await this.dependencies.codex.readThread(threadId);
+        this.indexThread(project.id, summary, false);
+      } catch (error) {
+        this.dependencies.logger.warn(
+          { err: error, threadId, projectId: project.id },
+          "Failed to read a Desktop-assigned thread",
+        );
       }
     }
   }
@@ -1719,7 +1719,7 @@ export class Bridge {
       if (!record) throw new Error("没有找到该对话。", { cause: error });
       throw error;
     }
-    await this.validateThreadProject(summary, projectRoot);
+    await this.validateThreadProject(summary, projectRoot, project.id);
     record = this.indexThread(project.id, summary, record?.archived ?? false);
     if (!includeArchived && record.archived) throw new Error("该对话已归档。");
     return { record, summary };
@@ -1781,8 +1781,9 @@ export class Bridge {
   private async validateThreadProject(
     thread: CodexThreadSummary,
     projectRoot: string,
+    projectId?: string,
   ): Promise<void> {
-    if (!(await this.threadBelongsToProject(thread, projectRoot))) {
+    if (!(await this.threadBelongsToProject(thread, projectRoot, projectId))) {
       throw new Error("该对话不属于当前项目。");
     }
   }
@@ -1790,7 +1791,9 @@ export class Bridge {
   private async threadBelongsToProject(
     thread: CodexThreadSummary,
     projectRoot: string,
+    projectId?: string,
   ): Promise<boolean> {
+    if (projectId && this.desktopThreadProjects.get(thread.id) === projectId) return true;
     if (!thread.cwd) return false;
     if (this.samePath(thread.cwd, projectRoot)) return true;
     try {
@@ -2061,6 +2064,7 @@ export class Bridge {
         return;
       }
       const registrations: Array<{ sourceId: string; name: string; rootPath: string }> = [];
+      const assignedThreads = new Map<string, string>();
       const warnings: string[] = [];
       for (const project of snapshot.projects) {
         const primaryRoot = project.rootPaths[0];
@@ -2081,6 +2085,9 @@ export class Bridge {
             name: project.name,
             rootPath: resolvedRoot,
           });
+          for (const threadId of project.assignedThreadIds) {
+            assignedThreads.set(threadId, `desktop@${project.sourceId}`);
+          }
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           warnings.push(`${project.name} 的目录不可用（${detail}）`);
@@ -2095,6 +2102,11 @@ export class Bridge {
       for (const record of records) this.ensureProjectNumber(record.id);
       this.desktopProjectIds.clear();
       for (const record of records) this.desktopProjectIds.add(record.id);
+      this.desktopThreadProjects.clear();
+      for (const [threadId, projectId] of assignedThreads) {
+        if (this.desktopProjectIds.has(projectId))
+          this.desktopThreadProjects.set(threadId, projectId);
+      }
       this.desktopSyncWarning = warnings.length > 0 ? warnings.join("；") : undefined;
       this.dependencies.logger.info(
         {
@@ -2115,6 +2127,7 @@ export class Bridge {
     this.dependencies.database.syncDesktopProjects([]);
     this.desktopProjectOrder = [];
     this.desktopProjectIds.clear();
+    this.desktopThreadProjects.clear();
     this.desktopSyncWarning = warning;
   }
 

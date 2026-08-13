@@ -60,12 +60,14 @@ describe("CodexDesktopProjectDiscovery", () => {
           name: "Second Project",
           rootPaths: ["D:\\work\\second"],
           order: 0,
+          assignedThreadIds: [],
         },
         {
           sourceId: "first",
           name: "First Project",
           rootPaths: ["C:\\work\\first"],
           order: 1,
+          assignedThreadIds: [],
         },
       ],
       sourcePath: stateFile,
@@ -103,7 +105,15 @@ describe("CodexDesktopProjectDiscovery", () => {
     });
 
     await expect(new CodexDesktopProjectDiscovery({ stateFile }).listProjects()).resolves.toEqual({
-      projects: [{ sourceId: "backup", name: "Backup", rootPaths: ["D:\\backup"], order: 0 }],
+      projects: [
+        {
+          sourceId: "backup",
+          name: "Backup",
+          rootPaths: ["D:\\backup"],
+          order: 0,
+          assignedThreadIds: [],
+        },
+      ],
       sourcePath: `${stateFile}.bak`,
       usedBackup: true,
     });
@@ -143,7 +153,15 @@ describe("CodexDesktopProjectDiscovery", () => {
     const snapshot = await new CodexDesktopProjectDiscovery(stateFile).listProjects();
 
     expect(snapshot).toEqual({
-      projects: [{ sourceId: "backup", name: "Backup", rootPaths: ["D:\\backup"], order: 0 }],
+      projects: [
+        {
+          sourceId: "backup",
+          name: "Backup",
+          rootPaths: ["D:\\backup"],
+          order: 0,
+          assignedThreadIds: [],
+        },
+      ],
       sourcePath: `${stateFile}.bak`,
       usedBackup: true,
     });
@@ -176,6 +194,28 @@ describe("CodexDesktopProjectDiscovery", () => {
 
     expect(snapshot.sourcePath).toBe(stateFile);
     expect(snapshot.projects[0]?.sourceId).toBe("default");
+  });
+
+  it("returns only valid thread assignments for each ordered project", async () => {
+    const stateFile = temporaryStateFile();
+    writeJson(stateFile, {
+      "project-order": ["project-a"],
+      "local-projects": {
+        "project-a": { name: "Project A", rootPaths: ["D:\\project-a"] },
+      },
+      "thread-project-assignments": {
+        "019fa387-c14a-7d53-91bb-da80480dc85a": { projectId: "project-a", private: "ignored" },
+        "not a thread id": { projectId: "project-a" },
+        "019fa752-2316-76a0-aaba-dc4df7e4ee2d": { projectId: "other" },
+      },
+    });
+
+    const snapshot = await new CodexDesktopProjectDiscovery({ stateFile }).listProjects();
+
+    expect(snapshot.projects[0]?.assignedThreadIds).toEqual([
+      "019fa387-c14a-7d53-91bb-da80480dc85a",
+    ]);
+    expect(JSON.stringify(snapshot)).not.toContain("private");
   });
 
   it("fails without leaking file contents when both state files are invalid", async () => {

@@ -148,4 +148,11 @@
 - 对于仅执行 `thread/start`、尚未产生 rollout 就被 App Server 释放的空对话，Codex 会返回 `no rollout found for thread id`。Bridge 现在会将该索引标为不可用、清除所有活动绑定和飞书话题路由，并从卡片与文本对话列表隐藏，避免继续选择后重复失败。
 - 2026-08-13 验证：`npm run check`、`npm run format:check`、`npm run build` 通过；全量 Vitest 为 18 个测试文件、196 项测试全部通过。受管实例已优雅重启到 `2.0.1`，状态 healthy，17/17 个 Codex Desktop 项目同步成功。
 
+### v2.0.2 Desktop 项目归属补丁
+
+- Desktop 左侧项目中的对话不一定以项目根目录作为线程 `cwd`；部分对话由 `.codex-global-state.json` 的私有 `thread-project-assignments` 映射归入项目。Bridge 现在以只读、严格校验方式同步这些线程 ID，并通过官方 `thread/read` 获取对话内容，不写 Desktop 状态文件。
+- 目录匹配仍作为没有显式项目归属时的兼容路径；显式 Desktop 项目归属优先，避免历史工作区、迁移目录或会话原始目录不同造成漏检。
+- 显式“新对话”创建后不再立即退订空线程；Bridge 会保留订阅直到用户发送首条任务并生成 rollout，任务完成后再按既有逻辑自动释放，避免项目话题中的第一条消息触发 `no rollout found`。
+- 2026-08-13 验证：临时 App Server 探针确认不带 `cwd` 的 `thread/list` 可见 59 条主对话，而 `codex 额度浮窗` 当前根目录过滤结果为 0，证明仅依赖 `cwd` 不足。修复后 `npm run check` 与全量 Vitest 通过，18 个测试文件共 197 项测试。
+
 上述运行态验证证明 2.0 已被本机进程加载，但没有替代“尚待现场验证”中的手机操作。尤其是项目群、CardKit 增量、表单、远程审批/提问和附件下载仍需使用无敏感数据的测试项目完成真实飞书 E2E。

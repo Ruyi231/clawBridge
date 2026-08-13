@@ -1156,7 +1156,7 @@ describe("Bridge vertical slice", () => {
     });
   });
 
-  it("unsubscribes a newly created chat while preserving its binding and history", async () => {
+  it("keeps a newly created empty chat subscribed until its first task creates a rollout", async () => {
     const channel = new FakeChannel();
     const codex = fakeCodex();
     const database = new BridgeDatabase(":memory:");
@@ -1173,9 +1173,8 @@ describe("Bridge vertical slice", () => {
     await channel.receive("/project use demo", "new-release-project");
     await channel.receive('/chat new "Desktop handoff"', "new-release-chat");
 
-    await vi.waitFor(() =>
-      expect(codex.unsubscribeThread).toHaveBeenCalledWith("thread-created-1"),
-    );
+    await vi.waitFor(() => expect(codex.startThread).toHaveBeenCalledTimes(1));
+    expect(codex.unsubscribeThread).not.toHaveBeenCalled();
     expect(codex.stop).not.toHaveBeenCalled();
     expect(database.getConversation("chat-owner")).toEqual({
       projectId: "demo",
@@ -1187,7 +1186,7 @@ describe("Bridge vertical slice", () => {
     });
   });
 
-  it("unsubscribes a newly created chat even when naming it fails", async () => {
+  it("keeps a newly created empty chat subscribed when naming it fails", async () => {
     const channel = new FakeChannel();
     const codex = fakeCodex();
     vi.mocked(codex.nameThread).mockRejectedValue(new Error("name unavailable"));
@@ -1208,9 +1207,7 @@ describe("Bridge vertical slice", () => {
     await vi.waitFor(() =>
       expect(channel.sent.some((message) => message.text.includes("命名失败"))).toBe(true),
     );
-    await vi.waitFor(() =>
-      expect(codex.unsubscribeThread).toHaveBeenCalledWith("thread-created-1"),
-    );
+    expect(codex.unsubscribeThread).not.toHaveBeenCalled();
     expect(codex.stop).not.toHaveBeenCalled();
     expect(database.getConversation("chat-owner")).toEqual({
       projectId: "demo",
@@ -1928,30 +1925,47 @@ describe("Bridge vertical slice", () => {
     try {
       const channel = new FakeChannel();
       const database = new BridgeDatabase(":memory:");
+      const codex = fakeCodex();
+      vi.mocked(codex.readThread).mockImplementation(async (threadId) => ({
+        id: threadId,
+        name: threadId === "thread-desktop-assigned" ? "Desktop assigned work" : "Test thread",
+        preview: "Existing Desktop conversation",
+        cwd: "C:\\historical\\unrelated-path",
+        updatedAt: Date.now(),
+        status: "notLoaded",
+      }));
       const desktopProjects: DesktopProjectSource = {
         listProjects: vi.fn(async () => ({
           sourcePath: path.join(temporaryDirectory, ".codex-global-state.json"),
           usedBackup: false,
           projects: [
-            { sourceId: "desktop-claw", name: "claw", rootPaths: [clawRoot], order: 0 },
+            {
+              sourceId: "desktop-claw",
+              name: "claw",
+              rootPaths: [clawRoot],
+              order: 0,
+              assignedThreadIds: [],
+            },
             {
               sourceId: "desktop-spaced",
               name: "Project With Space",
               rootPaths: [spacedRoot],
               order: 1,
+              assignedThreadIds: ["thread-desktop-assigned"],
             },
             {
               sourceId: "desktop-chinese",
               name: "项目文档",
               rootPaths: [chineseRoot],
               order: 2,
+              assignedThreadIds: [],
             },
           ],
         })),
       };
       bridge = new Bridge({
         channel,
-        codex: fakeCodex(),
+        codex,
         database,
         config: {
           ...config,
@@ -1995,6 +2009,24 @@ describe("Bridge vertical slice", () => {
         expect(database.getConversation("chat-owner")?.projectId).toBe("desktop@desktop-chinese"),
       );
 
+      await channel.receive('/project use "Project With Space"', "desktop-project-thread-owner");
+      await vi.waitFor(() =>
+        expect(database.getConversation("chat-owner")?.projectId).toBe("desktop@desktop-spaced"),
+      );
+      await channel.receive("/menu", "desktop-assigned-menu");
+      await vi.waitFor(() =>
+        expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+      );
+      await channel.receiveCard(
+        { version: 1, action: "thread.list", projectId: "desktop@desktop-spaced" },
+        "desktop-assigned-list",
+      );
+      await vi.waitFor(() =>
+        expect(
+          database.getProjectThread("desktop@desktop-spaced", "thread-desktop-assigned"),
+        ).toMatchObject({ title: "Desktop assigned work" }),
+      );
+
       await bridge.stop();
       bridge = undefined;
     } finally {
@@ -2023,6 +2055,7 @@ describe("Bridge vertical slice", () => {
                   name: "Desktop only",
                   rootPaths: [projectRoot],
                   order: 0,
+                  assignedThreadIds: [],
                 },
               ]
             : [],
