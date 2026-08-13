@@ -72,6 +72,8 @@ export interface CardOutboundMessage {
   /** Plain-text fallback used by the console channel and logs. */
   text: string;
   card: Record<string, unknown>;
+  /** Reply inside the originating project topic when supplied. */
+  replyToMessageId?: string | undefined;
 }
 
 export type OutboundMessage = TextOutboundMessage | CardOutboundMessage;
@@ -103,7 +105,7 @@ export type DeliveryRecord = DeliveryRecordBase &
     | {
         kind: "card";
         audience: "p2p" | "group";
-        payload: { text: string; card: Record<string, unknown> };
+        payload: { text: string; card: Record<string, unknown>; replyToMessageId?: string };
         message: CardOutboundMessage;
         /** @deprecated Use `message.card`. Contains the serialized card JSON. */
         body: string;

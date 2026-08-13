@@ -26,6 +26,12 @@ const effortSchema = z
   .min(1)
   .max(64)
   .regex(/^[A-Za-z0-9._-]+$/);
+const interactionTokenSchema = z.string().uuid();
+const questionIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
 
 const actionSchemas = [
   z.object({ version: z.literal(CARD_VERSION), action: z.literal("menu.refresh") }).strict(),
@@ -120,6 +126,23 @@ const actionSchemas = [
       reasoningEffort: effortSchema,
     })
     .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
+      action: z.literal("approval.resolve"),
+      token: interactionTokenSchema,
+      decision: z.enum(["accept", "decline", "cancel"]),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
+      action: z.literal("question.answer"),
+      token: interactionTokenSchema,
+      questionId: questionIdSchema,
+      answer: z.string().min(1).max(500).optional(),
+    })
+    .strict(),
 ] as const;
 
 const cardActionSchema = z.discriminatedUnion("action", actionSchemas);
@@ -201,6 +224,23 @@ export interface ModelListCardInput {
   }>;
   selectedModel?: string | null;
   selectedReasoningEffort?: string | null;
+}
+
+export interface ApprovalCardInput {
+  token: string;
+  kind: "command" | "file";
+  title: string;
+  detail: string;
+  reason?: string | null;
+}
+
+export interface QuestionCardInput {
+  token: string;
+  questionId: string;
+  header: string;
+  question: string;
+  options?: Array<{ label: string; description: string }> | null;
+  secret?: boolean;
 }
 
 export interface FeishuCard {
@@ -535,6 +575,106 @@ export function renderModelListCard(input: ModelListCardInput): FeishuCard {
     actionRow([button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" }))]),
   );
   return card("模型与推理强度", elements);
+}
+
+export function renderApprovalCard(input: ApprovalCardInput): FeishuCard {
+  return card(input.kind === "command" ? "Codex 命令审批" : "Codex 文件修改审批", [
+    markdown(`**${displayText(input.title, 80)}**\n${displayText(input.detail, 500)}`),
+    ...(input.reason ? [markdown(`**原因：** ${displayText(input.reason, 240)}`)] : []),
+    divider(),
+    actionRow([
+      button(
+        "允许一次",
+        action({
+          version: CARD_VERSION,
+          action: "approval.resolve",
+          token: input.token,
+          decision: "accept",
+        }),
+        "primary",
+      ),
+      button(
+        "拒绝",
+        action({
+          version: CARD_VERSION,
+          action: "approval.resolve",
+          token: input.token,
+          decision: "decline",
+        }),
+        "danger",
+      ),
+    ]),
+    actionRow([
+      button(
+        "拒绝并停止",
+        action({
+          version: CARD_VERSION,
+          action: "approval.resolve",
+          token: input.token,
+          decision: "cancel",
+        }),
+        "danger",
+      ),
+    ]),
+  ]);
+}
+
+export function renderQuestionCard(input: QuestionCardInput): FeishuCard {
+  const elements: Array<Record<string, unknown>> = [
+    markdown(`**${displayText(input.header, 40)}**\n${displayText(input.question, 400)}`),
+  ];
+  if (input.options?.length) {
+    for (const option of input.options.slice(0, 3)) {
+      elements.push(
+        actionRow([
+          button(
+            displayText(option.label, 24),
+            action({
+              version: CARD_VERSION,
+              action: "question.answer",
+              token: input.token,
+              questionId: input.questionId,
+              answer: option.label,
+            }),
+            "primary",
+          ),
+        ]),
+        markdown(displayText(option.description, 160)),
+      );
+    }
+  } else if (!input.secret) {
+    elements.push({
+      tag: "form",
+      name: "question_answer",
+      elements: [
+        {
+          tag: "input",
+          name: "answerText",
+          required: true,
+          max_length: 500,
+          placeholder: { tag: "plain_text", content: "输入回答" },
+        },
+        {
+          ...button(
+            "提交回答",
+            action({
+              version: CARD_VERSION,
+              action: "question.answer",
+              token: input.token,
+              questionId: input.questionId,
+            }),
+            "primary",
+          ),
+          name: "question_answer_submit",
+          action_type: "form_submit",
+          complex_interaction: true,
+        },
+      ],
+    });
+  } else {
+    elements.push(markdown("该问题要求秘密输入。为避免敏感内容进入飞书记录，已拒绝远程回答。"));
+  }
+  return card("Codex 需要你的回答", elements);
 }
 
 export function renderThreadListCard(input: ThreadListCardInput): FeishuCard {

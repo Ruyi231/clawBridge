@@ -1,12 +1,15 @@
 import path from "node:path";
 import { stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { ChannelAdapter } from "../channels/channel-adapter.js";
 import {
   parseCardAction,
+  renderApprovalCard,
   renderHomeCard,
   renderModelListCard,
   renderProjectCreateCard,
+  renderQuestionCard,
   renderProjectListCard,
   renderTaskCenterCard,
   renderThreadListCard,
@@ -15,6 +18,7 @@ import {
 } from "../channels/feishu-card.js";
 import type {
   CodexRunner,
+  CodexServerRequestContext,
   CodexThreadDetails,
   CodexThreadSummary,
 } from "../codex/protocol-types.js";
@@ -80,6 +84,17 @@ export class Bridge {
   private desktopSyncWarning: string | undefined;
   private desktopRefreshPromise: Promise<void> | undefined;
   private codexClosing = false;
+  private readonly pendingInteractions = new Map<
+    string,
+    | { kind: "approval"; taskId: string; respond: (result: unknown) => Promise<void> }
+    | {
+        kind: "question";
+        taskId: string;
+        questionIds: Set<string>;
+        answers: Record<string, { answers: string[] }>;
+        respond: (result: unknown) => Promise<void>;
+      }
+  >();
 
   constructor(
     private readonly dependencies: {
@@ -97,6 +112,12 @@ export class Bridge {
       dependencies.database,
       dependencies.config.projectManagement,
     );
+    dependencies.codex.setServerRequestHandler((context) => {
+      void this.handleCodexServerRequest(context).catch((error: unknown) => {
+        dependencies.logger.error({ err: error }, "Failed to route Codex server request");
+        void context.reject({ code: -32603, message: "ClawBridge interaction failed" });
+      });
+    });
   }
 
   async start(): Promise<void> {
@@ -169,10 +190,18 @@ export class Bridge {
         // card.action.trigger does not expose chat_type. Prove that the click
         // belongs to a card this Bridge successfully sent to the same chat,
         // then apply the sender allowlist without inventing a p2p classification.
-        if (!database.isSentCardMessage(event.chatId, event.messageId, "p2p")) {
+        const isP2pCard = database.isSentCardMessage(event.chatId, event.messageId, "p2p");
+        const isGroupCard = database.isSentCardMessage(event.chatId, event.messageId, "group");
+        if (!isP2pCard && !isGroupCard) {
           throw new BridgeError("UNAUTHORIZED", "Card source is not recognized");
         }
         authorizeMessage(event, { allowedOpenId, directMessagesOnly: false });
+        if (isGroupCard) {
+          const space = database.getFeishuProjectSpaceByChat(event.chatId);
+          if (!space || space.ownerOpenId !== event.senderOpenId) {
+            throw new BridgeError("UNAUTHORIZED", "Group card source is not recognized");
+          }
+        }
       } else {
         if (event.chatType === "group") {
           authorizeMessage(event, { allowedOpenId, directMessagesOnly: false });
@@ -564,6 +593,10 @@ export class Bridge {
         );
       }
     } finally {
+      for (const [token, pending] of this.pendingInteractions) {
+        if (pending.taskId !== task.id) continue;
+        this.pendingInteractions.delete(token);
+      }
       if (activeThreadId && !this.stopping) {
         const released = await this.releaseThreadSubscription(activeThreadId, {
           context: "completed task",
@@ -705,6 +738,12 @@ export class Bridge {
           action.reasoningEffort,
         );
         return;
+      case "approval.resolve":
+        await this.resolveApprovalAction(action);
+        return;
+      case "question.answer":
+        await this.resolveQuestionAction(event, action);
+        return;
       case "chat.close":
         await this.runChatClose(event.chatId);
         return;
@@ -720,6 +759,150 @@ export class Bridge {
       projectId,
       clearThread: false,
     });
+  }
+
+  private findActiveTask(threadId: string, turnId: string): TaskRecord | undefined {
+    for (const active of this.activeTasks.values()) {
+      if (active.threadId !== threadId || active.turnId !== turnId) continue;
+      return this.dependencies.database.getTask(active.taskId);
+    }
+    return undefined;
+  }
+
+  private async handleCodexServerRequest(context: CodexServerRequestContext): Promise<void> {
+    const params =
+      typeof context.request.params === "object" && context.request.params !== null
+        ? (context.request.params as Record<string, unknown>)
+        : {};
+    const threadId = typeof params.threadId === "string" ? params.threadId : "";
+    const turnId = typeof params.turnId === "string" ? params.turnId : "";
+    const task = this.findActiveTask(threadId, turnId);
+    if (!task) {
+      await context.reject({
+        code: -32602,
+        message: "No active ClawBridge task owns this request",
+      });
+      return;
+    }
+    if (
+      context.request.method === "item/commandExecution/requestApproval" ||
+      context.request.method === "item/fileChange/requestApproval"
+    ) {
+      const token = randomUUID();
+      this.pendingInteractions.set(token, {
+        kind: "approval",
+        taskId: task.id,
+        respond: context.respond,
+      });
+      this.dependencies.database.updateTask(task.id, "waiting_approval");
+      const command = typeof params.command === "string" ? params.command : "修改当前项目文件";
+      this.replyCard(
+        task.chatId,
+        renderApprovalCard({
+          token,
+          kind: context.request.method.includes("commandExecution") ? "command" : "file",
+          title: context.request.method.includes("commandExecution")
+            ? "请求执行命令"
+            : "请求修改文件",
+          detail: command,
+          reason: typeof params.reason === "string" ? params.reason : null,
+        }),
+        "Codex 等待远程审批",
+        task.replyToMessageId ? "group" : "p2p",
+        task.replyToMessageId ?? undefined,
+      );
+      return;
+    }
+    if (context.request.method === "item/tool/requestUserInput") {
+      const questions = Array.isArray(params.questions) ? params.questions : [];
+      const parsed = questions.flatMap((value) => {
+        if (typeof value !== "object" || value === null) return [];
+        const question = value as Record<string, unknown>;
+        if (
+          typeof question.id !== "string" ||
+          typeof question.header !== "string" ||
+          typeof question.question !== "string"
+        )
+          return [];
+        const options = Array.isArray(question.options)
+          ? question.options.flatMap((entry) => {
+              if (typeof entry !== "object" || entry === null) return [];
+              const option = entry as Record<string, unknown>;
+              return typeof option.label === "string" && typeof option.description === "string"
+                ? [{ label: option.label, description: option.description }]
+                : [];
+            })
+          : null;
+        return [
+          {
+            id: question.id,
+            header: question.header,
+            question: question.question,
+            options,
+            secret: question.isSecret === true,
+          },
+        ];
+      });
+      if (!parsed.length || parsed.some((question) => question.secret)) {
+        await context.reject({
+          code: -32602,
+          message: "Secret or invalid remote questions are not supported",
+        });
+        return;
+      }
+      const token = randomUUID();
+      this.pendingInteractions.set(token, {
+        kind: "question",
+        taskId: task.id,
+        questionIds: new Set(parsed.map((question) => question.id)),
+        answers: {},
+        respond: context.respond,
+      });
+      this.dependencies.database.updateTask(task.id, "waiting_approval");
+      for (const question of parsed) {
+        this.replyCard(
+          task.chatId,
+          renderQuestionCard({ token, questionId: question.id, ...question }),
+          "Codex 等待你的回答",
+          task.replyToMessageId ? "group" : "p2p",
+          task.replyToMessageId ?? undefined,
+        );
+      }
+      return;
+    }
+    await context.reject({
+      code: -32601,
+      message: `Unsupported App Server request ${context.request.method}`,
+    });
+  }
+
+  private async resolveApprovalAction(
+    action: Extract<CardAction, { action: "approval.resolve" }>,
+  ): Promise<void> {
+    const pending = this.pendingInteractions.get(action.token);
+    if (!pending || pending.kind !== "approval") throw new Error("该审批已处理或已过期。 ");
+    this.pendingInteractions.delete(action.token);
+    await pending.respond({ decision: action.decision });
+    this.dependencies.database.updateTask(pending.taskId, "running");
+  }
+
+  private async resolveQuestionAction(
+    event: InboundCardAction,
+    action: Extract<CardAction, { action: "question.answer" }>,
+  ): Promise<void> {
+    const pending = this.pendingInteractions.get(action.token);
+    if (!pending || pending.kind !== "question" || !pending.questionIds.has(action.questionId)) {
+      throw new Error("该问题已处理或已过期。 ");
+    }
+    const rawAnswer = action.answer ?? event.formValue?.answerText;
+    if (typeof rawAnswer !== "string" || !rawAnswer.trim() || rawAnswer.length > 500) {
+      throw new Error("请输入 1–500 个字符的回答。 ");
+    }
+    pending.answers[action.questionId] = { answers: [rawAnswer.trim()] };
+    if (Object.keys(pending.answers).length < pending.questionIds.size) return;
+    this.pendingInteractions.delete(action.token);
+    await pending.respond({ answers: pending.answers });
+    this.dependencies.database.updateTask(pending.taskId, "running");
   }
 
   private async openProjectSpace(
@@ -1690,13 +1873,20 @@ export class Bridge {
     void this.drainDeliveries();
   }
 
-  private replyCard(chatId: string, card: FeishuCard, fallbackText: string): void {
+  private replyCard(
+    chatId: string,
+    card: FeishuCard,
+    fallbackText: string,
+    audience: "p2p" | "group" = "p2p",
+    replyToMessageId?: string,
+  ): void {
     this.dependencies.database.queueOutbound({
       kind: "card",
       chatId,
-      audience: "p2p",
+      audience,
       text: fallbackText,
       card: card as unknown as Record<string, unknown>,
+      ...(replyToMessageId ? { replyToMessageId } : {}),
     });
     void this.drainDeliveries();
   }

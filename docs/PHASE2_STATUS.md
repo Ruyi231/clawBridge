@@ -70,6 +70,15 @@
 - 模型和推理强度回调会重新查询当前 Codex 模型目录，并验证项目、当前对话、模型及受支持 effort，拒绝过期卡片和伪造选项
 - 模型卡、新建项目表单已通过本地协议、数据库、渲染和 Bridge 集成测试；真实手机端仍需验证飞书客户端的 `form_submit` 展示与回传
 
+### ClawBridge 2.0-D：远程审批与 Codex 提问
+
+- App Server 的 server request 由客户端专用 handler 接管，不再由 app 入口无条件拒绝；未知方法仍返回 JSON-RPC `-32601`
+- `item/commandExecution/requestApproval` 与 `item/fileChange/requestApproval` 显示一次性审批卡，只支持 `accept`、`decline` 和 `cancel`，不开放持久策略修改
+- `item/tool/requestUserInput` 支持最多三个可选项和非秘密自由文本表单；多问题会在收齐全部 question id 后一次返回协议要求的 answers map
+- 卡片使用随机 UUID 令牌绑定当前活动 task，消费后立即失效；任务终态会清除尚未处理的令牌
+- 群话题审批卡通过 interactive reply 回到原话题；回调必须命中 Bridge 已成功发送的同 chat、同 audience 卡片，并再次验证项目群 owner
+- `isSecret` 问题不会进入飞书消息或日志；无活动 thread/turn 所有权的 server request 会被拒绝
+
 方法语义参考 [OpenAI 官方 Codex App Server 文档](https://developers.openai.com/codex/app-server)，未依赖实验性的对话分页接口。实际 JSON-RPC wire 字段和枚举以本机 Codex CLI `0.147.0` 运行 `codex app-server generate-json-schema` 生成的 schema 为当前基线，并已用同一二进制完成真实验证。
 
 2026-08-11 的 App Server smoke 覆盖 `initialize`、最小只读回合、新建、命名、历史读取、未归档列表、归档列表、恢复和最终再次归档，所有断言均通过。测试对话最终保持归档。该结论不代表跨版本兼容，也不代表飞书中的旧 Bridge 进程已经重新加载本次构建。

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   parseCardAction,
   renderHomeCard,
+  renderApprovalCard,
+  renderQuestionCard,
   renderProjectListCard,
   renderTaskCenterCard,
   renderThreadListCard,
@@ -33,6 +35,19 @@ describe("parseCardAction", () => {
       { version: 1, action: "task.list" },
       { version: 1, action: "task.list", projectId: "claw", page: 3 },
       { version: 1, action: "thread.list", projectId: "claw" },
+      {
+        version: 1,
+        action: "approval.resolve",
+        token: "00000000-0000-4000-8000-000000000001",
+        decision: "accept",
+      },
+      {
+        version: 1,
+        action: "question.answer",
+        token: "00000000-0000-4000-8000-000000000002",
+        questionId: "choice",
+        answer: "safe",
+      },
       { version: 1, action: "thread.list", projectId: "claw", page: 7 },
       { version: 1, action: "thread.use", projectId: "claw", threadId: "019f-aa" },
       { version: 1, action: "thread.new", projectId: "claw" },
@@ -61,6 +76,30 @@ describe("parseCardAction", () => {
 });
 
 describe("Feishu card rendering", () => {
+  it("renders approval and question cards with one-time token actions", () => {
+    const approval = renderApprovalCard({
+      token: "00000000-0000-4000-8000-000000000001",
+      kind: "command",
+      title: "执行命令",
+      detail: "npm test",
+      reason: "verify",
+    });
+    expect(actions(approval).map((value) => value.action)).toEqual([
+      "approval.resolve",
+      "approval.resolve",
+      "approval.resolve",
+    ]);
+    const question = renderQuestionCard({
+      token: "00000000-0000-4000-8000-000000000002",
+      questionId: "choice",
+      header: "模式",
+      question: "选择模式",
+      options: [{ label: "安全", description: "只读" }],
+    });
+    expect(actions(question)).toContainEqual(
+      expect.objectContaining({ action: "question.answer", answer: "安全" }),
+    );
+  });
   it("renders a mobile-friendly home card using only whitelisted actions", () => {
     const card = renderHomeCard({
       project: { id: "claw", name: "claw" },

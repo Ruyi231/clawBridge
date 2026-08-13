@@ -6,6 +6,12 @@ export interface JsonRpcRequest {
   params?: unknown;
 }
 
+export interface CodexServerRequestContext {
+  request: JsonRpcRequest;
+  respond: (result: unknown) => Promise<void>;
+  reject: (error: { code: number; message: string; data?: unknown }) => Promise<void>;
+}
+
 export interface JsonRpcNotification {
   method: string;
   params?: unknown;
@@ -113,6 +119,7 @@ export type NormalizedCodexEvent =
   | { type: "error"; threadId?: string; turnId?: string; message: string };
 
 export interface CodexRunner {
+  setServerRequestHandler(handler: (context: CodexServerRequestContext) => void): void;
   runTurn(input: {
     cwd: string;
     prompt: string;

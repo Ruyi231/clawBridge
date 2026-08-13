@@ -159,7 +159,12 @@ afterEach(async () => bridge?.stop());
 
 function fakeCodex(): CodexRunner {
   let createdThread = 0;
+  let serverRequestHandler: Parameters<CodexRunner["setServerRequestHandler"]>[0] | undefined;
   return {
+    setServerRequestHandler: vi.fn((handler) => {
+      serverRequestHandler = handler;
+      void serverRequestHandler;
+    }),
     listModels: vi.fn(async () => [
       {
         id: "gpt-test",
@@ -173,6 +178,63 @@ function fakeCodex(): CodexRunner {
     ]),
     runTurn: vi.fn(async (input: Parameters<CodexRunner["runTurn"]>[0]) => {
       input.onStarted?.({ threadId: "thread-bridge", turnId: "turn-bridge" });
+      if (input.prompt === "needs approval") {
+        await new Promise<void>((resolve, reject) => {
+          serverRequestHandler?.({
+            request: {
+              id: "approval-1",
+              method: "item/commandExecution/requestApproval",
+              params: {
+                threadId: "thread-bridge",
+                turnId: "turn-bridge",
+                itemId: "item-1",
+                startedAtMs: Date.now(),
+                command: "npm test",
+                reason: "Run tests",
+              },
+            },
+            respond: async (result) => {
+              if ((result as { decision?: string }).decision !== "accept") {
+                reject(new Error("approval declined"));
+                return;
+              }
+              resolve();
+            },
+            reject: async (error) => reject(new Error(error.message)),
+          });
+        });
+      }
+      if (input.prompt === "needs answer") {
+        await new Promise<void>((resolve, reject) => {
+          serverRequestHandler?.({
+            request: {
+              id: "question-1",
+              method: "item/tool/requestUserInput",
+              params: {
+                threadId: "thread-bridge",
+                turnId: "turn-bridge",
+                itemId: "item-2",
+                isBlocking: true,
+                questions: [
+                  {
+                    id: "choice",
+                    header: "选择模式",
+                    question: "使用哪个模式？",
+                    options: [{ label: "安全", description: "只读运行" }],
+                  },
+                ],
+              },
+            },
+            respond: async (result) => {
+              const answer = (result as { answers?: Record<string, { answers: string[] }> }).answers
+                ?.choice?.answers[0];
+              if (answer !== "安全") reject(new Error("unexpected answer"));
+              else resolve();
+            },
+            reject: async (error) => reject(new Error(error.message)),
+          });
+        });
+      }
       return {
         threadId: "thread-bridge",
         turnId: "turn-bridge",
@@ -222,6 +284,35 @@ function fakeCodex(): CodexRunner {
 }
 
 describe("Bridge vertical slice", () => {
+  function cardActionValue(
+    message: OutboundMessage | undefined,
+    actionName: string,
+  ): Record<string, unknown> | undefined {
+    if (message?.kind !== "card") return undefined;
+    const visit = (value: unknown): Record<string, unknown> | undefined => {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          const found = visit(item);
+          if (found) return found;
+        }
+      } else if (typeof value === "object" && value !== null) {
+        const record = value as Record<string, unknown>;
+        if (
+          typeof record.value === "object" &&
+          record.value !== null &&
+          (record.value as Record<string, unknown>).action === actionName
+        )
+          return record.value as Record<string, unknown>;
+        for (const child of Object.values(record)) {
+          const found = visit(child);
+          if (found) return found;
+        }
+      }
+      return undefined;
+    };
+    return visit(message.card);
+  }
+
   it("prints a local pairing candidate without authorizing it", async () => {
     const channel = new FakeChannel();
     const codex = fakeCodex();
@@ -247,6 +338,66 @@ describe("Bridge vertical slice", () => {
     );
     expect(codex.runTurn).not.toHaveBeenCalled();
     expect(channel.sent).toHaveLength(0);
+  });
+
+  it("routes command approval to a one-time card and resumes the task", async () => {
+    const channel = new FakeChannel();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("needs approval", "approval-task");
+    await vi.waitFor(() =>
+      expect(database.listTasks({ limit: 1 })[0]?.state).toBe("waiting_approval"),
+    );
+    const card = channel.sent.find(
+      (message) => message.kind === "card" && message.text === "Codex 等待远程审批",
+    );
+    const value = cardActionValue(card, "approval.resolve");
+    expect(value).toMatchObject({ decision: "accept" });
+    await channel.receiveCard(value!, "approval-answer");
+    await vi.waitFor(() => expect(database.listTasks({ limit: 1 })[0]?.state).toBe("completed"));
+    await channel.receiveCard(value!, "approval-replay");
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) => message.kind !== "card" && message.text.includes("已处理或已过期"),
+        ),
+      ).toBe(true),
+    );
+  });
+
+  it("routes Codex user input options through a question card", async () => {
+    const channel = new FakeChannel();
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("needs answer", "question-task");
+    await vi.waitFor(() =>
+      expect(database.listTasks({ limit: 1 })[0]?.state).toBe("waiting_approval"),
+    );
+    const card = channel.sent.find(
+      (message) => message.kind === "card" && message.text === "Codex 等待你的回答",
+    );
+    const value = cardActionValue(card, "question.answer");
+    expect(value).toMatchObject({ answer: "安全", questionId: "choice" });
+    await channel.receiveCard(value!, "question-answer");
+    await vi.waitFor(() => expect(database.listTasks({ limit: 1 })[0]?.state).toBe("completed"));
   });
 
   it("persists an inbound message, runs Codex, and sends the final result", async () => {

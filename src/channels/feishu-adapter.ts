@@ -161,20 +161,19 @@ export class FeishuAdapter implements ChannelAdapter {
   async send(message: OutboundMessage): Promise<string> {
     const isCard = message.kind === "card";
     const content = JSON.stringify(isCard ? message.card : { text: message.text });
-    const response =
-      !isCard && message.replyToMessageId
-        ? await this.client.im.message.reply({
-            path: { message_id: message.replyToMessageId },
-            data: { msg_type: "text", content, reply_in_thread: true },
-          })
-        : await this.client.im.message.create({
-            params: { receive_id_type: "chat_id" },
-            data: {
-              receive_id: message.chatId,
-              msg_type: isCard ? "interactive" : "text",
-              content,
-            },
-          });
+    const response = message.replyToMessageId
+      ? await this.client.im.message.reply({
+          path: { message_id: message.replyToMessageId },
+          data: { msg_type: isCard ? "interactive" : "text", content, reply_in_thread: true },
+        })
+      : await this.client.im.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: {
+            receive_id: message.chatId,
+            msg_type: isCard ? "interactive" : "text",
+            content,
+          },
+        });
     if (response.code !== 0)
       throw new Error(`Feishu send failed: ${response.msg ?? response.code}`);
     const messageId = response.data?.message_id;

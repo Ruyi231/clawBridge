@@ -14,6 +14,7 @@ import {
 } from "./event-normalizer.js";
 import type {
   CodexRunner,
+  CodexServerRequestContext,
   CodexModelInfo,
   CodexThreadDetails,
   CodexThreadListInput,
@@ -72,6 +73,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly notificationBuffer: JsonRpcMessage[] = [];
+  private serverRequestHandler?: (context: CodexServerRequestContext) => void;
 
   constructor(private readonly options: AppServerOptions) {
     super();
@@ -100,6 +102,10 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
     } finally {
       if (this.stopPromise === stopPromise) this.stopPromise = undefined;
     }
+  }
+
+  setServerRequestHandler(handler: (context: CodexServerRequestContext) => void): void {
+    this.serverRequestHandler = handler;
   }
 
   async runTurn(input: {
@@ -594,6 +600,21 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
         pending.reject(new BridgeError("CODEX_PROTOCOL_ERROR", response.error.message));
       else pending.resolve(response.result);
       return;
+    }
+    if ("id" in message && "method" in message) {
+      const request = message as import("./protocol-types.js").JsonRpcRequest;
+      if (this.serverRequestHandler) {
+        this.serverRequestHandler({
+          request,
+          respond: (result) => this.respondToServerRequest(request.id, result),
+          reject: (error) => this.rejectServerRequest(request.id, error),
+        });
+      } else {
+        void this.rejectServerRequest(request.id, {
+          code: -32601,
+          message: `Unsupported App Server request ${request.method}`,
+        });
+      }
     }
     this.notificationBuffer.push(message);
     if (this.notificationBuffer.length > 200) this.notificationBuffer.shift();

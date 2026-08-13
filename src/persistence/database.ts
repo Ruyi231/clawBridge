@@ -354,6 +354,9 @@ function toDelivery(row: DeliveryRow): DeliveryRecord {
         audience: row.audience,
         text,
         card: payload.card,
+        ...(typeof payload.replyToMessageId === "string"
+          ? { replyToMessageId: payload.replyToMessageId }
+          : {}),
       },
       body: row.body,
     };
@@ -1342,7 +1345,11 @@ export class BridgeDatabase {
     const kind = message.kind === "card" ? "card" : "text";
     const payload =
       message.kind === "card"
-        ? { text: message.text, card: message.card }
+        ? {
+            text: message.text,
+            card: message.card,
+            ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
+          }
         : {
             text: message.text,
             ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),

@@ -141,6 +141,31 @@ describe("Feishu adapter card contract", () => {
     await handling;
   });
 
+  it("replies with an interactive card inside a project topic", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+    await expect(
+      adapter.send({
+        kind: "card",
+        audience: "group",
+        chatId: "oc-project-1",
+        replyToMessageId: "om-topic-root",
+        text: "approval",
+        card: { header: { title: "Approve" }, elements: [] },
+      }),
+    ).resolves.toBe("om-reply-1");
+    expect(larkMocks.replyMessage).toHaveBeenCalledWith({
+      path: { message_id: "om-topic-root" },
+      data: {
+        msg_type: "interactive",
+        content: JSON.stringify({ header: { title: "Approve" }, elements: [] }),
+        reply_in_thread: true,
+      },
+    });
+  });
+
   it("rejects malformed card actions without dispatching them", async () => {
     const adapter = new FeishuAdapter(
       { appId: "cli-test", appSecret: "secret" },

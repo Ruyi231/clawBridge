@@ -7,7 +7,6 @@ import { FeishuAdapter } from "./channels/feishu-adapter.js";
 import { ConsoleAdapter } from "./channels/console-adapter.js";
 import type { ChannelAdapter } from "./channels/channel-adapter.js";
 import { Bridge } from "./core/bridge.js";
-import type { JsonRpcMessage } from "./codex/protocol-types.js";
 import { CodexDesktopProjectDiscovery } from "./projects/codex-desktop-project-discovery.js";
 import { pathToFileURL } from "node:url";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
@@ -182,34 +181,6 @@ async function main(): Promise<void> {
     logger.debug({ source: "codex", message }, "Codex stderr"),
   );
   codex.on("protocolError", (error: Error) => logger.warn({ err: error }, "Codex protocol error"));
-  codex.on("message", (message: JsonRpcMessage) => {
-    if (!("id" in message && "method" in message)) return;
-    if (
-      message.method === "item/commandExecution/requestApproval" ||
-      message.method === "item/fileChange/requestApproval"
-    ) {
-      logger.warn(
-        { method: message.method },
-        "Declining approval because mobile approval is not enabled",
-      );
-      void codex
-        .respondToServerRequest(message.id, { decision: "decline" })
-        .catch((error: unknown) => logger.error({ err: error }, "Failed to decline approval"));
-      return;
-    }
-    logger.warn(
-      { method: message.method },
-      "Rejecting unsupported App Server request because mobile interaction is not enabled",
-    );
-    void codex
-      .rejectServerRequest(message.id, {
-        code: -32601,
-        message: `ClawBridge does not support App Server request ${message.method}`,
-      })
-      .catch((error: unknown) =>
-        logger.error({ err: error }, "Failed to reject unsupported App Server request"),
-      );
-  });
   const bridge = new Bridge({
     channel,
     codex,
