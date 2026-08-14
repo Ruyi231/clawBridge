@@ -1358,11 +1358,96 @@ describe("Bridge vertical slice", () => {
       "chat-owner",
     );
     await vi.waitFor(() => expect(channel.createProjectSpace).toHaveBeenCalledTimes(1));
-    expect(database.getFeishuProjectSpace("demo")?.chatId).toBe("chat-created-project");
+    await vi.waitFor(() =>
+      expect(database.getFeishuProjectSpace("demo")?.chatId).toBe("chat-created-project"),
+    );
     await vi.waitFor(() => expect(channel.createProjectTopic).toHaveBeenCalledTimes(2));
     const replacementTopicKey = channel.createProjectTopic.mock.calls.at(-1)?.[0].idempotencyKey;
     expect(replacementTopicKey).toMatch(/^clawbridge-topic-[0-9a-f]{32}$/);
     expect(replacementTopicKey).not.toBe(originalTopicKey);
+  });
+
+  it("does not persist a project group that dissolves immediately after creation", async () => {
+    const channel = new FakeChannel({ updateCards: true });
+    channel.inspectProjectSpace.mockResolvedValue({ status: "dissolved" });
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.selectProject("chat-owner", "demo");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("/menu", "dissolved-after-create-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+    const cardMessageId = channel.latestCardMessageIdForChat("chat-owner");
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "dissolved-after-create-action",
+      "owner",
+      cardMessageId,
+    );
+
+    await vi.waitFor(() => expect(channel.createProjectSpace).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) =>
+            message.kind === "text" &&
+            message.text.includes("飞书项目群创建后不可用（状态：dissolved）"),
+        ),
+      ).toBe(true),
+    );
+    expect(database.getFeishuProjectSpace("demo")).toBeUndefined();
+  });
+
+  it("repairs a newly created project group when the owner is initially absent", async () => {
+    const channel = new FakeChannel({ updateCards: true });
+    channel.inspectProjectSpace
+      .mockResolvedValueOnce({ status: "owner_absent" })
+      .mockResolvedValueOnce({ status: "ready", displayName: "[Codex] Demo" });
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.selectProject("chat-owner", "demo");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+
+    await channel.receive("/menu", "repair-owner-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "repair-owner-action",
+      "owner",
+      channel.latestCardMessageIdForChat("chat-owner"),
+    );
+
+    await vi.waitFor(() =>
+      expect(channel.addProjectSpaceMember).toHaveBeenCalledWith({
+        chatId: "chat-created-project",
+        ownerOpenId: "owner",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(database.getFeishuProjectSpace("demo")?.chatId).toBe("chat-created-project"),
+    );
   });
 
   it("opens a legacy project group even when Feishu rejects the message-mode migration", async () => {

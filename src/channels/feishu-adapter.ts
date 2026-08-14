@@ -420,11 +420,13 @@ export class FeishuAdapter implements ChannelAdapter {
       this.client.im.chat.create({
         params: {
           user_id_type: "open_id",
+          set_bot_manager: true,
           uuid: input.idempotencyKey.slice(0, 50),
         },
         data: {
           name: displayName,
           description: `ClawBridge project workspace: ${input.projectId}`.slice(0, 100),
+          owner_id: input.ownerOpenId,
           user_id_list: [input.ownerOpenId],
           group_message_type: "chat",
           chat_mode: "group",

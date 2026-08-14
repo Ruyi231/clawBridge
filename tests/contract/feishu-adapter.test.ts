@@ -510,11 +510,13 @@ describe("Feishu adapter card contract", () => {
     expect(larkMocks.createChat).toHaveBeenCalledWith({
       params: {
         user_id_type: "open_id",
+        set_bot_manager: true,
         uuid: "project-demo-123",
       },
       data: {
         name: "[Codex] Demo Project",
         description: "ClawBridge project workspace: demo",
+        owner_id: "ou-owner",
         user_id_list: ["ou-owner"],
         group_message_type: "chat",
         chat_mode: "group",

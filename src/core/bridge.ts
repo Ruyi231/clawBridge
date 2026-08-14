@@ -1109,12 +1109,11 @@ export class Bridge {
           "Could not inspect the previous Feishu project group; rebuilding it",
         );
         try {
-          const created = await channel.createProjectSpace({
-            projectId,
-            projectName: project.name,
+          const created = await this.createReadyProjectSpace(
+            project,
             ownerOpenId,
-            idempotencyKey: `clawbridge-inspect-${randomUUID()}`,
-          });
+            `clawbridge-inspect-${randomUUID()}`,
+          );
           space = database.replaceFeishuProjectSpace({
             projectId,
             chatId: created.chatId,
@@ -1144,12 +1143,11 @@ export class Bridge {
             { err: error, projectId, chatId: space.chatId },
             "Could not rejoin the previous Feishu project group; rebuilding it",
           );
-          const created = await channel.createProjectSpace({
-            projectId,
-            projectName: project.name,
+          const created = await this.createReadyProjectSpace(
+            project,
             ownerOpenId,
-            idempotencyKey: `clawbridge-rejoin-${randomUUID()}`,
-          });
+            `clawbridge-rejoin-${randomUUID()}`,
+          );
           space = database.replaceFeishuProjectSpace({
             projectId,
             chatId: created.chatId,
@@ -1161,12 +1159,11 @@ export class Bridge {
         }
       } else if (inspection?.status === "dissolved" || inspection?.status === "missing") {
         if (!channel.createProjectSpace) throw new Error("当前消息通道不支持重建项目群。");
-        const created = await channel.createProjectSpace({
-          projectId,
-          projectName: project.name,
+        const created = await this.createReadyProjectSpace(
+          project,
           ownerOpenId,
-          idempotencyKey: `clawbridge-rebuild-${randomUUID()}`,
-        });
+          `clawbridge-rebuild-${randomUUID()}`,
+        );
         space = database.replaceFeishuProjectSpace({
           projectId,
           chatId: created.chatId,
@@ -1208,12 +1205,11 @@ export class Bridge {
     }
     if (!space) {
       if (!channel.createProjectSpace) throw new Error("当前消息通道不支持创建项目群。");
-      const created = await channel.createProjectSpace({
-        projectId,
-        projectName: project.name,
+      const created = await this.createReadyProjectSpace(
+        project,
         ownerOpenId,
-        idempotencyKey: `clawbridge-project-${projectId}`,
-      });
+        `clawbridge-project-${randomUUID()}`,
+      );
       space = database.bindFeishuProjectSpace({
         projectId,
         chatId: created.chatId,
@@ -1365,6 +1361,47 @@ export class Bridge {
         controlMessageId,
       );
     }
+  }
+
+  private async createReadyProjectSpace(
+    project: ProjectRecord,
+    ownerOpenId: string,
+    idempotencyKey: string,
+  ): Promise<{ chatId: string; displayName: string }> {
+    const { channel } = this.dependencies;
+    if (!channel.createProjectSpace) throw new Error("当前消息通道不支持创建项目群。");
+    const created = await channel.createProjectSpace({
+      projectId: project.id,
+      projectName: project.name,
+      ownerOpenId,
+      idempotencyKey,
+    });
+    if (!channel.inspectProjectSpace) return created;
+
+    let lastStatus: "ready" | "owner_absent" | "dissolved" | "missing" | undefined;
+    let memberRepairAttempted = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 200));
+      const inspection = await channel.inspectProjectSpace({
+        chatId: created.chatId,
+        ownerOpenId,
+      });
+      lastStatus = inspection.status;
+      if (inspection.status === "ready") return created;
+      if (
+        inspection.status === "owner_absent" &&
+        !memberRepairAttempted &&
+        channel.addProjectSpaceMember
+      ) {
+        memberRepairAttempted = true;
+        await channel.addProjectSpaceMember({ chatId: created.chatId, ownerOpenId });
+        continue;
+      }
+      if (inspection.status === "dissolved") break;
+    }
+    throw new Error(
+      `飞书项目群创建后不可用（状态：${lastStatus ?? "unknown"}），未保存失效群入口。`,
+    );
   }
 
   private async leaveProjectSpace(
