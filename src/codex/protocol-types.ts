@@ -88,6 +88,34 @@ export interface CodexModelInfo {
   supportedReasoningEfforts: CodexReasoningEffortOption[];
 }
 
+export interface CodexRateLimitWindow {
+  usedPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+}
+
+export interface CodexRateLimitSnapshot {
+  limitId: string | null;
+  limitName: string | null;
+  planType: string | null;
+  primary: CodexRateLimitWindow | null;
+  secondary: CodexRateLimitWindow | null;
+  rateLimitReachedType: string | null;
+  spendControlReached: boolean | null;
+  individualLimit: {
+    limit: string;
+    used: string;
+    remainingPercent: number;
+    resetsAt: number;
+  } | null;
+}
+
+export interface CodexRateLimits {
+  rateLimits: CodexRateLimitSnapshot;
+  rateLimitsByLimitId: Record<string, CodexRateLimitSnapshot> | null;
+  availableResetCredits: number | null;
+}
+
 export type CodexThreadUnsubscribeStatus = "notLoaded" | "notSubscribed" | "unsubscribed";
 
 export type NormalizedCodexEvent =
@@ -135,6 +163,7 @@ export interface CodexRunner {
     onProgress?: (event: NormalizedCodexEvent) => void;
   }): Promise<CodexTurnResult>;
   listModels(): Promise<CodexModelInfo[]>;
+  readRateLimits(): Promise<CodexRateLimits>;
   startThread(input: CodexThreadStartInput): Promise<CodexThreadSummary>;
   listThreads(input: CodexThreadListInput): Promise<CodexThreadSummary[]>;
   readThread(threadId: string): Promise<CodexThreadSummary>;

@@ -1,6 +1,6 @@
 {
   "name": "clawbridge",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "private": true,
   "description": "A local Feishu-to-Codex bridge for Windows.",
   "type": "module",

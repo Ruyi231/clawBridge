@@ -236,6 +236,20 @@ function fakeCodex(): CodexRunner {
         supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Balanced" }],
       },
     ]),
+    readRateLimits: vi.fn(async () => ({
+      rateLimits: {
+        limitId: "codex",
+        limitName: "Codex",
+        planType: "plus",
+        primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+        secondary: { usedPercent: 40, windowDurationMins: 10_080, resetsAt: 1_800_100_000 },
+        rateLimitReachedType: null,
+        spendControlReached: false,
+        individualLimit: null,
+      },
+      rateLimitsByLimitId: null,
+      availableResetCredits: 2,
+    })),
     runTurn: vi.fn(async (input: Parameters<CodexRunner["runTurn"]>[0]) => {
       input.onStarted?.({ threadId: "thread-bridge", turnId: "turn-bridge" });
       if (input.prompt === "needs approval") {
@@ -528,6 +542,38 @@ describe("Bridge vertical slice", () => {
     expect(channel.sent.at(-1)?.text).toContain("thread-bridge");
   });
 
+  it("shows current Codex remaining quota from the single-chat console", async () => {
+    const channel = new FakeChannel({ updateCards: true });
+    const codex = fakeCodex();
+    bridge = new Bridge({
+      channel,
+      codex,
+      database: new BridgeDatabase(":memory:"),
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receive("/menu", "quota-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+    const cardMessageId = channel.latestCardMessageIdForChat("chat-owner");
+    await channel.receiveCard(
+      { version: 1, action: "quota.show" },
+      "quota-show",
+      "owner",
+      cardMessageId,
+    );
+
+    await vi.waitFor(() => expect(codex.readRateLimits).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("剩余 75%"),
+    );
+  });
+
   it("keeps only the finalized stream card when streaming succeeds", async () => {
     const channel = new FakeChannel({ streaming: true });
     const database = new BridgeDatabase(":memory:");
@@ -577,6 +623,10 @@ describe("Bridge vertical slice", () => {
   it("routes a registered project topic to its bound Codex thread", async () => {
     const channel = new FakeChannel();
     const codex = fakeCodex();
+    vi.mocked(codex.runTurn).mockImplementationOnce(async (input) => {
+      input.onStarted?.({ threadId: "thread-topic", turnId: "turn-topic" });
+      return { threadId: "thread-topic", turnId: "turn-topic", finalText: "done" };
+    });
     const database = new BridgeDatabase(":memory:");
     database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
     database.upsertThread({ threadId: "thread-topic", projectId: "demo", status: "idle" });
@@ -616,6 +666,91 @@ describe("Bridge vertical slice", () => {
         threadId: "thread-topic",
       }),
     );
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) =>
+            message.kind === "card" &&
+            message.replyToMessageId === "topic-root-1" &&
+            JSON.stringify(message.card).includes("会话工具栏"),
+        ),
+      ).toBe(true),
+    );
+  });
+
+  it("opens model settings at the bottom when a project topic receives the exact model keyword", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.upsertThread({ threadId: "thread-topic", projectId: "demo", status: "idle" });
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-group",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    database.bindFeishuThreadRoute({
+      threadId: "thread-topic",
+      projectId: "demo",
+      chatId: "chat-group",
+      topicRootId: "topic-root-1",
+      ownerOpenId: "owner",
+    });
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receiveGroup("模型", "topic-model", { topicRootId: "topic-root-1" });
+
+    await vi.waitFor(() => expect(codex.listModels).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) =>
+            message.kind === "card" &&
+            message.replyToMessageId === "topic-root-1" &&
+            message.text === "模型与推理强度",
+        ),
+      ).toBe(true),
+    );
+    expect(codex.runTurn).not.toHaveBeenCalled();
+  });
+
+  it("keeps model settings out of the project group's main chat", async () => {
+    const channel = new FakeChannel();
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-group",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receiveGroup("模型", "project-model");
+
+    expect(channel.sent).toHaveLength(0);
+    expect(codex.listModels).not.toHaveBeenCalled();
+    expect(codex.runTurn).not.toHaveBeenCalled();
   });
 
   it("invalidates an empty topic thread when Codex reports that no rollout exists", async () => {
@@ -1567,6 +1702,17 @@ describe("Bridge vertical slice", () => {
       expect(database.getConversation("chat-owner")?.threadId).toBe("thread-existing"),
     );
     expect(codex.readThread).toHaveBeenCalledWith("thread-existing");
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) =>
+            message.kind === "card" &&
+            message.chatId === "chat-created-project" &&
+            message.replyToMessageId === "topic-created-thread" &&
+            message.text.includes("会话工具栏"),
+        ),
+      ).toBe(true),
+    );
   });
 
   it("treats a legacy thread.show card as continue-conversation without a detail page", async () => {

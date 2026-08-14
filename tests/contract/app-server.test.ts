@@ -9,7 +9,7 @@ describe("Codex App Server JSONL contract", () => {
   it("identifies the released ClawBridge 2.0 client during initialization", async () => {
     client = new CodexAppServerClient({
       command: process.execPath,
-      args: [path.resolve("tests/fixtures/fake-app-server.mjs"), "--require-client-version=2.0.5"],
+      args: [path.resolve("tests/fixtures/fake-app-server.mjs"), "--require-client-version=2.2.0"],
       requestTimeoutMs: 2_000,
       turnTimeoutMs: 2_000,
     });
@@ -44,6 +44,26 @@ describe("Codex App Server JSONL contract", () => {
         reasoningEffort: "medium",
       }),
     ).resolves.toEqual(expect.objectContaining({ finalText: "fake result" }));
+  });
+
+  it("reads Codex account rate-limit windows", async () => {
+    client = new CodexAppServerClient({
+      command: process.execPath,
+      args: [path.resolve("tests/fixtures/fake-app-server.mjs")],
+      requestTimeoutMs: 2_000,
+      turnTimeoutMs: 2_000,
+    });
+
+    await expect(client.readRateLimits()).resolves.toEqual({
+      rateLimits: expect.objectContaining({
+        limitId: "codex",
+        planType: "plus",
+        primary: expect.objectContaining({ usedPercent: 25, windowDurationMins: 300 }),
+        secondary: expect.objectContaining({ usedPercent: 40, windowDurationMins: 10_080 }),
+      }),
+      rateLimitsByLimitId: null,
+      availableResetCredits: 2,
+    });
   });
   it("classifies the implicit thread created by runTurn as a user thread", async () => {
     client = new CodexAppServerClient({

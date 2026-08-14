@@ -206,6 +206,25 @@ input.on("line", (line) => {
       },
     });
   }
+  if (message.method === "account/rateLimits/read") {
+    send({
+      id: message.id,
+      result: {
+        rateLimits: {
+          limitId: "codex",
+          limitName: "Codex",
+          planType: "plus",
+          primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+          secondary: { usedPercent: 40, windowDurationMins: 10_080, resetsAt: 1_800_100_000 },
+          rateLimitReachedType: null,
+          spendControlReached: false,
+          individualLimit: null,
+        },
+        rateLimitsByLimitId: null,
+        rateLimitResetCredits: { availableCount: 2, credits: null },
+      },
+    });
+  }
   if (message.method === "turn/interrupt") {
     if (failInterrupt) {
       send({ id: message.id, error: { code: -32001, message: "interrupt failed" } });

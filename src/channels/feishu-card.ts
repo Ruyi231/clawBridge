@@ -35,6 +35,7 @@ const questionIdSchema = z
 
 const actionSchemas = [
   z.object({ version: z.literal(CARD_VERSION), action: z.literal("menu.refresh") }).strict(),
+  z.object({ version: z.literal(CARD_VERSION), action: z.literal("quota.show") }).strict(),
   z
     .object({
       version: z.literal(CARD_VERSION),
@@ -251,6 +252,34 @@ export interface ModelListCardInput {
   projectSpace?: boolean;
 }
 
+export interface ConversationToolbarCardInput {
+  project: CardProject;
+  thread: CardThread;
+  selectedModel?: string | null;
+  selectedReasoningEffort?: string | null;
+}
+
+export interface QuotaCardInput {
+  buckets: Array<{
+    id: string;
+    name: string;
+    planType?: string | null;
+    primary?: {
+      usedPercent: number;
+      windowDurationMins: number | null;
+      resetsAt: number | null;
+    } | null;
+    secondary?: {
+      usedPercent: number;
+      windowDurationMins: number | null;
+      resetsAt: number | null;
+    } | null;
+    remainingPercent?: number | null;
+    spendControlReached?: boolean | null;
+  }>;
+  availableResetCredits?: number | null;
+}
+
 export interface ApprovalCardInput {
   token: string;
   kind: "command" | "file";
@@ -447,11 +476,17 @@ export function renderHomeCard(input: HomeCardInput): FeishuCard {
           ? linkButton("项目群", input.projectSpaceUrl, undefined, "primary")
           : button("项目群", projectScopedAction("project.space", input.project.id)),
       ]),
-      actionRow([button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" }))]),
+      actionRow([
+        button("剩余额度", action({ version: CARD_VERSION, action: "quota.show" })),
+        button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" })),
+      ]),
     );
   } else {
     elements.push(
-      actionRow([button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" }))]),
+      actionRow([
+        button("剩余额度", action({ version: CARD_VERSION, action: "quota.show" })),
+        button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" })),
+      ]),
     );
   }
   return card("ClawBridge 控制台", elements);
@@ -478,19 +513,6 @@ export function renderProjectSpaceCard(input: ProjectSpaceCardInput): FeishuCard
         "项目任务",
         action({ version: CARD_VERSION, action: "task.list", projectId: input.project.id }),
       ),
-      ...(input.thread
-        ? [
-            button(
-              "模型设置",
-              action({
-                version: CARD_VERSION,
-                action: "model.list",
-                projectId: input.project.id,
-                threadId: input.thread.id,
-              }),
-            ),
-          ]
-        : []),
     ]),
     actionRow([
       button(
@@ -509,6 +531,68 @@ export function renderProjectSpaceCard(input: ProjectSpaceCardInput): FeishuCard
     ]),
   );
   return card(`${displayText(input.project.name, 50)} · 项目控制台`, elements);
+}
+
+export function renderConversationToolbarCard(input: ConversationToolbarCardInput): FeishuCard {
+  return card(`对话 #${input.thread.localNumber} · 会话工具栏`, [
+    markdown(
+      `**${displayText(input.thread.title || "未命名对话", 60)}**\n\n**模型：** ${displayText(input.selectedModel || "Codex 默认", 48)}\n**推理强度：** ${displayText(input.selectedReasoningEffort || "模型默认", 32)}\n\n直接在本话题发送下一项任务；发送“模型”也可随时重新打开设置。`,
+    ),
+    actionRow([
+      button(
+        "切换模型",
+        action({
+          version: CARD_VERSION,
+          action: "model.list",
+          projectId: input.project.id,
+          threadId: input.thread.id,
+        }),
+        "primary",
+      ),
+    ]),
+  ]);
+}
+
+function quotaWindowText(
+  label: string,
+  value: { usedPercent: number; windowDurationMins: number | null; resetsAt: number | null },
+): string {
+  const remaining = Math.max(0, Math.min(100, 100 - value.usedPercent));
+  const duration = value.windowDurationMins
+    ? value.windowDurationMins % 60 === 0
+      ? `${value.windowDurationMins / 60} 小时`
+      : `${value.windowDurationMins} 分钟`
+    : "当前窗口";
+  const reset = value.resetsAt
+    ? new Date(value.resetsAt * 1_000).toLocaleString("zh-CN", { hour12: false })
+    : "未知";
+  return `**${label}（${duration}）：** 剩余 ${remaining}% · 重置 ${reset}`;
+}
+
+export function renderQuotaCard(input: QuotaCardInput): FeishuCard {
+  const lines = input.buckets.flatMap((bucket) => {
+    const title = `### ${displayText(bucket.name || bucket.id, 60)}${bucket.planType ? ` · ${displayText(bucket.planType, 24)}` : ""}`;
+    const windows = [
+      ...(bucket.primary ? [quotaWindowText("主要额度", bucket.primary)] : []),
+      ...(bucket.secondary ? [quotaWindowText("次要额度", bucket.secondary)] : []),
+      ...(bucket.remainingPercent === null || bucket.remainingPercent === undefined
+        ? []
+        : [`**月度额度：** 剩余 ${Math.max(0, Math.min(100, bucket.remainingPercent))}%`]),
+      ...(bucket.spendControlReached ? ["⚠️ 已达到消费控制限制"] : []),
+    ];
+    return [title, ...(windows.length ? windows : ["当前账户未返回可显示的额度窗口。"]), ""];
+  });
+  if (input.availableResetCredits !== null && input.availableResetCredits !== undefined) {
+    lines.push(`**可用额度重置次数：** ${input.availableResetCredits}`);
+  }
+  return card("Codex 剩余额度", [
+    markdown(lines.length ? lines.join("\n") : "当前账户没有返回额度信息。"),
+    divider(),
+    actionRow([
+      button("刷新额度", action({ version: CARD_VERSION, action: "quota.show" }), "primary"),
+      button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" })),
+    ]),
+  ]);
 }
 
 export function renderProjectListCard(input: ProjectListCardInput): FeishuCard {

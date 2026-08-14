@@ -6,11 +6,13 @@ import type { ChannelAdapter } from "../channels/channel-adapter.js";
 import {
   parseCardAction,
   renderApprovalCard,
+  renderConversationToolbarCard,
   renderHomeCard,
   renderModelListCard,
   renderProjectCreateCard,
   renderProjectSpaceCard,
   renderQuestionCard,
+  renderQuotaCard,
   renderProjectListCard,
   renderTaskCenterCard,
   renderThreadListCard,
@@ -318,8 +320,34 @@ export class Bridge {
     const requestsCardMenu =
       (command?.group === "control" && command.action === "menu") ||
       /^(菜单|控制台)$/i.test(message.text.trim());
+    const requestsModelCard =
+      message.chatType === "group" && /^(模型|模型设置)$/i.test(message.text.trim());
     if (requestsCardMenu && message.chatType !== "p2p") {
       this.reply(message.chatId, "交互卡片仅支持机器人单聊，请在与机器人的单聊中发送“菜单”。");
+      return;
+    }
+    if (requestsModelCard) {
+      const route = this.dependencies.database.resolveFeishuThreadRoute(
+        message.chatId,
+        message.topicRootId!,
+      );
+      if (!route) {
+        this.reply(
+          message.chatId,
+          "请先在本话题发送第一项任务，创建真实 Codex 对话后再选择模型。",
+          undefined,
+          message.topicRootId,
+        );
+        return;
+      }
+      await this.showModelCard(
+        message.chatId,
+        route.projectId,
+        route.threadId,
+        undefined,
+        message.topicRootId,
+      );
+      await this.drainDeliveries();
       return;
     }
     if (this.codexClosing && !(command?.group === "chat" && command.action === "close")) {
@@ -624,6 +652,16 @@ export class Bridge {
           task.replyToMessageId,
         );
       }
+      if (task.replyToMessageId) {
+        try {
+          await this.showConversationToolbar(task.projectId, result.threadId);
+        } catch (toolbarError) {
+          logger.warn(
+            { err: toolbarError, taskId: task.id },
+            "Failed to show conversation toolbar",
+          );
+        }
+      }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       try {
@@ -765,6 +803,9 @@ export class Bridge {
       case "menu.refresh":
         await this.showHomeCard(event.chatId, undefined, event.messageId);
         return;
+      case "quota.show":
+        await this.showQuotaCard(event.chatId, event.messageId);
+        return;
       case "project.list":
         await this.showProjectCard(event.chatId, action.page ?? 0, event.messageId);
         return;
@@ -847,6 +888,7 @@ export class Bridge {
           action.projectId,
           event.messageId,
         );
+        await this.showConversationToolbar(action.projectId, action.threadId);
         return;
       case "thread.new":
         await this.ensureCardProjectSelected(event.chatId, action.projectId);
@@ -870,6 +912,7 @@ export class Bridge {
           action.projectId,
           event.messageId,
         );
+        await this.showConversationToolbar(action.projectId, action.threadId);
         return;
       case "task.stop":
         await this.runStop(event.chatId);
@@ -1605,17 +1648,89 @@ export class Bridge {
     }
   }
 
+  private async showQuotaCard(chatId: string, replaceMessageId?: string): Promise<void> {
+    const limits = await this.dependencies.codex.readRateLimits();
+    this.assertNotStopping();
+    const entries =
+      limits.rateLimitsByLimitId && Object.keys(limits.rateLimitsByLimitId).length > 0
+        ? Object.entries(limits.rateLimitsByLimitId)
+        : [[limits.rateLimits.limitId ?? "codex", limits.rateLimits] as const];
+    const card = renderQuotaCard({
+      buckets: entries.map(([id, snapshot]) => ({
+        id,
+        name: snapshot.limitName ?? snapshot.limitId ?? id,
+        planType: snapshot.planType,
+        primary: snapshot.primary,
+        secondary: snapshot.secondary,
+        remainingPercent: snapshot.individualLimit?.remainingPercent ?? null,
+        spendControlReached: snapshot.spendControlReached,
+      })),
+      availableResetCredits: limits.availableResetCredits,
+    });
+    if (replaceMessageId) {
+      await this.updateOrReplyCard(replaceMessageId, chatId, card, "Codex 剩余额度");
+    } else {
+      this.replyCard(chatId, card, "Codex 剩余额度", "p2p");
+    }
+  }
+
+  private async showConversationToolbar(projectId: string, threadId: string): Promise<void> {
+    const { database } = this.dependencies;
+    const project = database.getProject(projectId);
+    const thread = database.getProjectThread(projectId, threadId);
+    const route = database.getFeishuThreadRoute(threadId);
+    if (!project || !thread || !route || route.projectId !== projectId) return;
+    const execution = database.getThreadExecutionSettings(threadId);
+    this.replyCard(
+      route.chatId,
+      renderConversationToolbarCard({
+        project: { id: project.id, name: project.name },
+        thread: {
+          id: thread.threadId,
+          projectId: thread.projectId,
+          localNumber: thread.localNumber,
+          title: thread.title,
+        },
+        selectedModel: execution?.model ?? null,
+        selectedReasoningEffort: execution?.reasoningEffort ?? null,
+      }),
+      `对话 #${thread.localNumber} 会话工具栏`,
+      "group",
+      route.topicRootId,
+    );
+    await this.drainDeliveries();
+  }
+
+  private assertModelTarget(chatId: string, projectId: string, threadId: string): void {
+    const { database } = this.dependencies;
+    const groupSpace = database.getFeishuProjectSpaceByChat(chatId);
+    if (groupSpace) {
+      const route = database.getFeishuThreadRoute(threadId);
+      if (
+        groupSpace.projectId !== projectId ||
+        !route ||
+        route.projectId !== projectId ||
+        route.chatId !== chatId
+      ) {
+        throw new Error("该模型卡不属于当前项目话题，请重新打开对话。 ");
+      }
+      return;
+    }
+    const conversation = database.getConversation(chatId);
+    if (conversation?.projectId !== projectId || conversation.threadId !== threadId) {
+      throw new Error("该卡片对应的项目或对话已不是当前选择，请重新打开对话。 ");
+    }
+  }
+
   private async showModelCard(
     chatId: string,
     projectId: string,
     threadId: string,
     replaceMessageId?: string,
+    replyToMessageId?: string,
   ): Promise<void> {
     const { database, codex } = this.dependencies;
-    const conversation = database.getConversation(chatId);
-    if (conversation?.projectId !== projectId || conversation.threadId !== threadId) {
-      throw new Error("该卡片对应的项目或对话已不是当前选择，请返回控制台刷新。 ");
-    }
+    this.assertModelTarget(chatId, projectId, threadId);
     const project = database.getProject(projectId);
     const thread = database.getProjectThread(projectId, threadId);
     if (!project || !thread) throw new Error("当前对话不存在，请刷新控制台。 ");
@@ -1641,7 +1756,13 @@ export class Bridge {
     if (replaceMessageId) {
       await this.updateOrReplyCard(replaceMessageId, chatId, card, "模型与推理强度");
     } else {
-      this.replyCard(chatId, card, "模型与推理强度");
+      this.replyCard(
+        chatId,
+        card,
+        "模型与推理强度",
+        replyToMessageId ? "group" : undefined,
+        replyToMessageId,
+      );
     }
   }
 
@@ -1654,10 +1775,7 @@ export class Bridge {
     replaceMessageId?: string,
   ): Promise<void> {
     const { database, codex } = this.dependencies;
-    const conversation = database.getConversation(chatId);
-    if (conversation?.projectId !== projectId || conversation.threadId !== threadId) {
-      throw new Error("该卡片已过期，请返回控制台重新打开模型设置。 ");
-    }
+    this.assertModelTarget(chatId, projectId, threadId);
     this.assertNotStopping();
     const models = await codex.listModels();
     this.assertNotStopping();

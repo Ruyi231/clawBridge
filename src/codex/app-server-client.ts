@@ -16,6 +16,8 @@ import type {
   CodexRunner,
   CodexServerRequestContext,
   CodexModelInfo,
+  CodexRateLimits,
+  CodexRateLimitSnapshot,
   CodexThreadDetails,
   CodexThreadListInput,
   CodexThreadStartInput,
@@ -61,6 +63,84 @@ function toWireApprovalPolicy(
 
 function toWireSandbox(sandbox: CodexThreadStartInput["sandbox"]): "workspace-write" | "read-only" {
   return sandbox === "workspaceWrite" ? "workspace-write" : "read-only";
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function optionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function extractRateLimitSnapshot(value: unknown): CodexRateLimitSnapshot {
+  if (typeof value !== "object" || value === null) throw new Error("Invalid rate-limit snapshot");
+  const row = value as Record<string, unknown>;
+  const window = (candidate: unknown) => {
+    if (typeof candidate !== "object" || candidate === null) return null;
+    const item = candidate as Record<string, unknown>;
+    if (typeof item.usedPercent !== "number" || !Number.isFinite(item.usedPercent)) {
+      throw new Error("Invalid rate-limit window");
+    }
+    return {
+      usedPercent: item.usedPercent,
+      windowDurationMins: optionalNumber(item.windowDurationMins),
+      resetsAt: optionalNumber(item.resetsAt),
+    };
+  };
+  const individual = row.individualLimit;
+  const individualLimit =
+    typeof individual === "object" &&
+    individual !== null &&
+    typeof (individual as Record<string, unknown>).limit === "string" &&
+    typeof (individual as Record<string, unknown>).used === "string" &&
+    typeof (individual as Record<string, unknown>).remainingPercent === "number" &&
+    typeof (individual as Record<string, unknown>).resetsAt === "number"
+      ? {
+          limit: (individual as Record<string, unknown>).limit as string,
+          used: (individual as Record<string, unknown>).used as string,
+          remainingPercent: (individual as Record<string, unknown>).remainingPercent as number,
+          resetsAt: (individual as Record<string, unknown>).resetsAt as number,
+        }
+      : null;
+  return {
+    limitId: optionalString(row.limitId),
+    limitName: optionalString(row.limitName),
+    planType: optionalString(row.planType),
+    primary: window(row.primary),
+    secondary: window(row.secondary),
+    rateLimitReachedType: optionalString(row.rateLimitReachedType),
+    spendControlReached:
+      typeof row.spendControlReached === "boolean" ? row.spendControlReached : null,
+    individualLimit,
+  };
+}
+
+function extractRateLimits(value: unknown): CodexRateLimits {
+  if (typeof value !== "object" || value === null) throw new Error("Invalid rate-limit response");
+  const row = value as Record<string, unknown>;
+  const byIdValue = row.rateLimitsByLimitId;
+  const byId =
+    typeof byIdValue === "object" && byIdValue !== null
+      ? Object.fromEntries(
+          Object.entries(byIdValue as Record<string, unknown>).map(([key, snapshot]) => [
+            key,
+            extractRateLimitSnapshot(snapshot),
+          ]),
+        )
+      : null;
+  const resetCredits = row.rateLimitResetCredits;
+  const availableResetCredits =
+    typeof resetCredits === "object" &&
+    resetCredits !== null &&
+    typeof (resetCredits as Record<string, unknown>).availableCount === "number"
+      ? ((resetCredits as Record<string, unknown>).availableCount as number)
+      : null;
+  return {
+    rateLimits: extractRateLimitSnapshot(row.rateLimits),
+    rateLimitsByLimitId: byId,
+    availableResetCredits,
+  };
 }
 
 export class CodexAppServerClient extends EventEmitter implements CodexRunner {
@@ -319,6 +399,23 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
     return models;
   }
 
+  async readRateLimits(): Promise<CodexRateLimits> {
+    await this.start();
+    const result = await this.request("account/rateLimits/read");
+    try {
+      return extractRateLimits(result);
+    } catch (error) {
+      throw new BridgeError(
+        "CODEX_PROTOCOL_ERROR",
+        "Invalid account/rateLimits/read response",
+        false,
+        {
+          cause: error,
+        },
+      );
+    }
+  }
+
   async readThread(threadId: string): Promise<CodexThreadSummary> {
     await this.start();
     const result = await this.request("thread/read", { threadId, includeTurns: false });
@@ -410,7 +507,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRunner {
       child.stderr.on("data", (chunk: Buffer) => this.emit("stderr", chunk.toString("utf8")));
 
       await this.request("initialize", {
-        clientInfo: { name: "clawbridge", title: "ClawBridge", version: "2.0.5" },
+        clientInfo: { name: "clawbridge", title: "ClawBridge", version: "2.2.0" },
         capabilities: {},
       });
       if (this.child !== child) {

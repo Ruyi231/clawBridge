@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   parseCardAction,
+  renderConversationToolbarCard,
   renderHomeCard,
+  renderQuotaCard,
   renderProjectSpaceCard,
   renderApprovalCard,
   renderQuestionCard,
@@ -29,6 +31,7 @@ describe("parseCardAction", () => {
   it("accepts every supported action with the required internal IDs", () => {
     const inputs = [
       { version: 1, action: "menu.refresh" },
+      { version: 1, action: "quota.show" },
       { version: 1, action: "project.list" },
       { version: 1, action: "project.list", page: 1_000 },
       { version: 1, action: "project.use", projectId: "desktop@abc-123" },
@@ -121,16 +124,17 @@ describe("Feishu card rendering", () => {
       "project.list",
       "menu.refresh",
       "project.space",
+      "quota.show",
       "chat.close",
     ]);
     const actionRows = card.elements.filter((element) => element.tag === "action");
     expect(actionRows).toHaveLength(3);
-    expect(actionRows.map((row) => row.layout)).toEqual(["bisected", "flow", "flow"]);
+    expect(actionRows.map((row) => row.layout)).toEqual(["bisected", "flow", "bisected"]);
     expect(
       actionRows.map((row) =>
         (row.actions as Array<{ text: { content: string } }>).map((item) => item.text.content),
       ),
-    ).toEqual([["选择项目", "刷新"], ["项目群"], ["交还桌面"]]);
+    ).toEqual([["选择项目", "刷新"], ["项目群"], ["剩余额度", "交还桌面"]]);
     expect(actionRows.every((row) => (row.actions as unknown[]).length <= 2)).toBe(true);
     const summary = card.elements[0] as { text: { content: string } };
     expect(summary.text.content).toContain("本控制台只负责选择项目和进入项目群");
@@ -142,15 +146,19 @@ describe("Feishu card rendering", () => {
     expect(actions(card).map((item) => item.action)).toEqual([
       "project.list",
       "menu.refresh",
+      "quota.show",
       "chat.close",
     ]);
     const actionRows = card.elements.filter((element) => element.tag === "action");
-    expect(actionRows.map((row) => row.layout)).toEqual(["bisected", "flow"]);
+    expect(actionRows.map((row) => row.layout)).toEqual(["bisected", "bisected"]);
     expect(
       actionRows.map((row) =>
         (row.actions as Array<{ text: { content: string } }>).map((item) => item.text.content),
       ),
-    ).toEqual([["选择项目", "刷新"], ["交还桌面"]]);
+    ).toEqual([
+      ["选择项目", "刷新"],
+      ["剩余额度", "交还桌面"],
+    ]);
     expect(actionRows.every((row) => (row.actions as unknown[]).length <= 2)).toBe(true);
   });
 
@@ -187,13 +195,45 @@ describe("Feishu card rendering", () => {
       "thread.list",
       "thread.new",
       "task.list",
-      "model.list",
       "project.dissolve",
     ]);
     expect(actions(card).every((item) => !("projectId" in item) || item.projectId === "demo")).toBe(
       true,
     );
     expect(JSON.stringify(card)).toContain("任务请进入对应的独立话题");
+  });
+
+  it("renders a compact conversation toolbar with only model controls", () => {
+    const card = renderConversationToolbarCard({
+      project: { id: "demo", name: "Demo" },
+      thread: { id: "thread-1", projectId: "demo", localNumber: 3, title: "修复登录" },
+      selectedModel: "gpt-test",
+      selectedReasoningEffort: "high",
+    });
+    expect(actions(card)).toEqual([
+      { version: 1, action: "model.list", projectId: "demo", threadId: "thread-1" },
+    ]);
+    expect(JSON.stringify(card)).toContain("直接在本话题发送下一项任务");
+    expect(JSON.stringify(card)).not.toContain("查看状态");
+  });
+
+  it("renders remaining quota and refresh controls", () => {
+    const card = renderQuotaCard({
+      buckets: [
+        {
+          id: "codex",
+          name: "Codex",
+          planType: "plus",
+          primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: null },
+          secondary: { usedPercent: 40, windowDurationMins: 10_080, resetsAt: null },
+        },
+      ],
+      availableResetCredits: 2,
+    });
+    expect(JSON.stringify(card)).toContain("剩余 75%");
+    expect(JSON.stringify(card)).toContain("剩余 60%");
+    expect(JSON.stringify(card)).toContain("可用额度重置次数");
+    expect(actions(card).map((item) => item.action)).toEqual(["quota.show", "menu.refresh"]);
   });
 
   it("requires confirmation before exiting and discarding a project group", () => {
