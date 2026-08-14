@@ -1594,6 +1594,13 @@ describe("Bridge vertical slice", () => {
     );
     await vi.waitFor(() => expect(channel.updatedCards).toHaveLength(1));
     expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("选择项目");
+    expect(
+      database.getLatestSentCardMessageId({
+        chatId: "chat-owner",
+        body: "选择项目",
+        audience: "p2p",
+      }),
+    ).toBe(cardMessageId);
 
     await channel.receiveCard(
       { version: 1, action: "project.use", projectId: "demo" },
@@ -1603,6 +1610,13 @@ describe("Bridge vertical slice", () => {
     );
     await vi.waitFor(() => expect(channel.updatedCards).toHaveLength(2));
     expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("项目群已创建");
+    expect(
+      database.getLatestSentCardMessageId({
+        chatId: "chat-owner",
+        body: "ClawBridge 控制台",
+        audience: "p2p",
+      }),
+    ).toBe(cardMessageId);
     expect(channel.createProjectSpace).toHaveBeenCalledTimes(1);
     expect(
       channel.sent.filter(

@@ -219,6 +219,64 @@ describe("task persistence", () => {
     ).toBeUndefined();
   });
 
+  it("tracks an in-place card rewrite under its new control-card identity", () => {
+    const projectList = { schema: "2.0", body: { elements: [{ tag: "markdown" }] } };
+    const home = { schema: "2.0", body: { elements: [{ tag: "action" }] } };
+    const olderHome = database.queueOutbound({
+      chatId: "chat-control",
+      kind: "card",
+      audience: "p2p",
+      text: "ClawBridge 控制台",
+      card: home,
+    });
+    database.markDeliverySent(olderHome.id, "message-older-control-card");
+    const delivery = database.queueOutbound({
+      chatId: "chat-control",
+      kind: "card",
+      audience: "p2p",
+      text: "选择项目",
+      card: projectList,
+    });
+    database.markDeliverySent(delivery.id, "message-control-card");
+
+    expect(
+      database.getLatestSentCardMessageId({
+        chatId: "chat-control",
+        audience: "p2p",
+      }),
+    ).toBe("message-control-card");
+
+    expect(
+      database.recordSentCardUpdate({
+        chatId: "chat-control",
+        channelMessageId: "message-control-card",
+        body: "ClawBridge 控制台",
+        card: home,
+      }),
+    ).toBe(true);
+
+    expect(database.getDelivery(delivery.id)?.message).toEqual({
+      chatId: "chat-control",
+      kind: "card",
+      audience: "p2p",
+      text: "ClawBridge 控制台",
+      card: home,
+    });
+    expect(
+      database.getLatestSentCardMessageId({
+        chatId: "chat-control",
+        body: "ClawBridge 控制台",
+        audience: "p2p",
+      }),
+    ).toBe("message-control-card");
+    expect(
+      database.getLatestSentCardMessageId({
+        chatId: "chat-control",
+        audience: "p2p",
+      }),
+    ).toBe("message-control-card");
+  });
+
   it("persists a topic reply target in text deliveries", () => {
     const queued = database.queueOutbound({
       chatId: "chat-project",

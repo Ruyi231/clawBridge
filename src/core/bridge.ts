@@ -1410,7 +1410,6 @@ export class Bridge {
       database.clearSelectedProject(controlChatId, projectId);
       const controlMessageId = database.getLatestSentCardMessageId({
         chatId: controlChatId,
-        body: "ClawBridge 控制台",
         audience: "p2p",
       });
       await this.showHomeCard(
@@ -2514,6 +2513,12 @@ export class Bridge {
           messageId,
           card as unknown as Record<string, unknown>,
         );
+        this.dependencies.database.recordSentCardUpdate({
+          chatId,
+          channelMessageId: messageId,
+          body: fallbackText,
+          card: card as unknown as Record<string, unknown>,
+        });
         return;
       } catch (error) {
         this.dependencies.logger.warn(

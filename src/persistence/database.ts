@@ -1628,18 +1628,50 @@ export class BridgeDatabase {
       .run(channelMessageId, new Date().toISOString(), deliveryId);
   }
 
+  recordSentCardUpdate(input: {
+    chatId: string;
+    channelMessageId: string;
+    body: string;
+    card: Record<string, unknown>;
+  }): boolean {
+    const result = this.database
+      .prepare(
+        `
+        UPDATE deliveries
+        SET body = ?, payload = ?, updated_at = ?
+        WHERE chat_id = ?
+          AND channel_message_id = ?
+          AND kind = 'card'
+          AND status = 'sent'
+      `,
+      )
+      .run(
+        input.body,
+        JSON.stringify({ text: input.body, card: input.card }),
+        new Date().toISOString(),
+        input.chatId,
+        input.channelMessageId,
+      );
+    return result.changes > 0;
+  }
+
   getLatestSentCardMessageId(input: {
     chatId: string;
-    body: string;
+    body?: string;
     audience: "p2p" | "group";
   }): string | undefined {
+    const bodyClause = input.body === undefined ? "" : " AND body = ?";
+    const parameters =
+      input.body === undefined
+        ? [input.chatId, input.audience]
+        : [input.chatId, input.body, input.audience];
     const row = this.database
       .prepare(
         `
         SELECT channel_message_id
         FROM deliveries
         WHERE chat_id = ?
-          AND body = ?
+          ${bodyClause}
           AND kind = 'card'
           AND audience = ?
           AND status = 'sent'
@@ -1648,7 +1680,7 @@ export class BridgeDatabase {
         LIMIT 1
       `,
       )
-      .get(input.chatId, input.body, input.audience) as { channel_message_id: string } | undefined;
+      .get(...parameters) as { channel_message_id: string } | undefined;
     return row?.channel_message_id;
   }
 
