@@ -92,6 +92,20 @@ CREATE TABLE IF NOT EXISTS feishu_thread_routes (
 CREATE INDEX IF NOT EXISTS idx_feishu_thread_routes_project
 ON feishu_thread_routes(project_id, updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS feishu_pending_topics (
+  topic_root_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(project_id),
+  chat_id TEXT NOT NULL,
+  owner_open_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(chat_id, topic_root_id),
+  FOREIGN KEY(project_id) REFERENCES feishu_project_spaces(project_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_feishu_pending_topics_project
+ON feishu_pending_topics(project_id, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS tasks (
   task_id TEXT PRIMARY KEY,
   event_id TEXT NOT NULL UNIQUE,
@@ -201,6 +215,15 @@ export interface FeishuThreadRouteRecord {
   updatedAt: string;
 }
 
+export interface FeishuPendingTopicRecord {
+  projectId: string;
+  chatId: string;
+  topicRootId: string;
+  ownerOpenId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ThreadExecutionSettingsRecord {
   threadId: string;
   model: string;
@@ -246,6 +269,15 @@ interface FeishuProjectSpaceRow {
 
 interface FeishuThreadRouteRow {
   thread_id: string;
+  project_id: string;
+  chat_id: string;
+  topic_root_id: string;
+  owner_open_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface FeishuPendingTopicRow {
   project_id: string;
   chat_id: string;
   topic_root_id: string;
@@ -439,6 +471,7 @@ export class BridgeDatabase {
     this.migrateTaskProgress();
     this.migrateThreadExecutionSettings();
     this.migrateTaskAttachments();
+    this.migratePendingFeishuTopics();
   }
 
   close(): void {
@@ -760,6 +793,38 @@ export class BridgeDatabase {
       .get(chatId) as { projectId: string | null; threadId: string | null } | undefined;
   }
 
+  listChatIdsForSelectedProject(projectId: string): string[] {
+    return (
+      this.database
+        .prepare(
+          "SELECT chat_id FROM chat_state WHERE active_project_id = ? ORDER BY updated_at DESC",
+        )
+        .all(projectId) as Array<{ chat_id: string }>
+    ).map((row) => row.chat_id);
+  }
+
+  clearSelectedProject(chatId: string, expectedProjectId: string): boolean {
+    return this.database.transaction(() => {
+      const current = this.getConversation(chatId);
+      if (current?.projectId !== expectedProjectId) return false;
+      const now = new Date().toISOString();
+      this.database
+        .prepare("UPDATE chat_state SET active_project_id = NULL, updated_at = ? WHERE chat_id = ?")
+        .run(now, chatId);
+      this.database
+        .prepare(
+          `INSERT INTO conversations(chat_id, project_id, thread_id, updated_at)
+           VALUES(?, NULL, NULL, ?)
+           ON CONFLICT(chat_id) DO UPDATE SET
+             project_id=NULL,
+             thread_id=NULL,
+             updated_at=excluded.updated_at`,
+        )
+        .run(chatId, now);
+      return true;
+    })();
+  }
+
   setThread(chatId: string, projectId: string, threadId: string): void {
     this.upsertThread({ threadId, projectId });
     this.database.transaction(() => {
@@ -1006,6 +1071,7 @@ export class BridgeDatabase {
     return this.database.transaction(() => {
       const space = this.bindFeishuProjectSpace(input);
       this.deleteFeishuThreadRoutes(input.projectId);
+      this.deleteFeishuPendingTopics(input.projectId);
       return space;
     })();
   }
@@ -1030,6 +1096,18 @@ export class BridgeDatabase {
         .prepare("SELECT * FROM feishu_project_spaces ORDER BY updated_at DESC, project_id")
         .all() as FeishuProjectSpaceRow[]
     ).map((row) => this.toFeishuProjectSpace(row));
+  }
+
+  deleteFeishuProjectSpace(projectId: string): boolean {
+    return this.database.transaction(() => {
+      this.deleteFeishuThreadRoutes(projectId);
+      this.deleteFeishuPendingTopics(projectId);
+      return (
+        this.database
+          .prepare("DELETE FROM feishu_project_spaces WHERE project_id = ?")
+          .run(projectId).changes > 0
+      );
+    })();
   }
 
   bindFeishuThreadRoute(input: {
@@ -1082,6 +1160,73 @@ export class BridgeDatabase {
     return this.getFeishuThreadRoute(input.threadId)!;
   }
 
+  bindFeishuPendingTopic(input: {
+    projectId: string;
+    chatId: string;
+    topicRootId: string;
+    ownerOpenId: string;
+  }): FeishuPendingTopicRecord {
+    const space = this.getFeishuProjectSpace(input.projectId);
+    if (!space || space.chatId !== input.chatId) {
+      throw new Error("Pending topic must use the project's registered Feishu chat");
+    }
+    if (space.ownerOpenId !== input.ownerOpenId) {
+      throw new Error("Pending topic owner must match the project space owner");
+    }
+    if (this.resolveFeishuThreadRoute(input.chatId, input.topicRootId)) {
+      throw new Error("Feishu topic is already bound to a Codex thread");
+    }
+    const now = new Date().toISOString();
+    this.database
+      .prepare(
+        `INSERT INTO feishu_pending_topics(
+          project_id, chat_id, topic_root_id, owner_open_id, created_at, updated_at
+        ) VALUES(?, ?, ?, ?, ?, ?)
+        ON CONFLICT(topic_root_id) DO UPDATE SET
+          project_id=excluded.project_id,
+          chat_id=excluded.chat_id,
+          owner_open_id=excluded.owner_open_id,
+          updated_at=excluded.updated_at`,
+      )
+      .run(input.projectId, input.chatId, input.topicRootId, input.ownerOpenId, now, now);
+    return this.resolveFeishuPendingTopic(input.chatId, input.topicRootId)!;
+  }
+
+  resolveFeishuPendingTopic(
+    chatId: string,
+    topicRootId: string,
+  ): FeishuPendingTopicRecord | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM feishu_pending_topics WHERE chat_id = ? AND topic_root_id = ?")
+      .get(chatId, topicRootId) as FeishuPendingTopicRow | undefined;
+    return row ? this.toFeishuPendingTopic(row) : undefined;
+  }
+
+  promoteFeishuPendingTopic(input: {
+    projectId: string;
+    chatId: string;
+    topicRootId: string;
+    threadId: string;
+  }): FeishuThreadRouteRecord {
+    return this.database.transaction(() => {
+      const pending = this.resolveFeishuPendingTopic(input.chatId, input.topicRootId);
+      if (!pending || pending.projectId !== input.projectId) {
+        throw new Error("Pending Feishu topic is no longer available");
+      }
+      const route = this.bindFeishuThreadRoute({
+        threadId: input.threadId,
+        projectId: input.projectId,
+        chatId: input.chatId,
+        topicRootId: input.topicRootId,
+        ownerOpenId: pending.ownerOpenId,
+      });
+      this.database
+        .prepare("DELETE FROM feishu_pending_topics WHERE topic_root_id = ?")
+        .run(input.topicRootId);
+      return route;
+    })();
+  }
+
   getFeishuThreadRoute(threadId: string): FeishuThreadRouteRecord | undefined {
     const row = this.database
       .prepare("SELECT * FROM feishu_thread_routes WHERE thread_id = ?")
@@ -1113,6 +1258,12 @@ export class BridgeDatabase {
       .run(projectId).changes;
   }
 
+  deleteFeishuPendingTopics(projectId: string): number {
+    return this.database
+      .prepare("DELETE FROM feishu_pending_topics WHERE project_id = ?")
+      .run(projectId).changes;
+  }
+
   deleteFeishuThreadRoute(threadId: string): boolean {
     return (
       this.database.prepare("DELETE FROM feishu_thread_routes WHERE thread_id = ?").run(threadId)
@@ -1134,6 +1285,17 @@ export class BridgeDatabase {
   private toFeishuThreadRoute(row: FeishuThreadRouteRow): FeishuThreadRouteRecord {
     return {
       threadId: row.thread_id,
+      projectId: row.project_id,
+      chatId: row.chat_id,
+      topicRootId: row.topic_root_id,
+      ownerOpenId: row.owner_open_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private toFeishuPendingTopic(row: FeishuPendingTopicRow): FeishuPendingTopicRecord {
+    return {
       projectId: row.project_id,
       chatId: row.chat_id,
       topicRootId: row.topic_root_id,
@@ -1464,6 +1626,30 @@ export class BridgeDatabase {
     `,
       )
       .run(channelMessageId, new Date().toISOString(), deliveryId);
+  }
+
+  getLatestSentCardMessageId(input: {
+    chatId: string;
+    body: string;
+    audience: "p2p" | "group";
+  }): string | undefined {
+    const row = this.database
+      .prepare(
+        `
+        SELECT channel_message_id
+        FROM deliveries
+        WHERE chat_id = ?
+          AND body = ?
+          AND kind = 'card'
+          AND audience = ?
+          AND status = 'sent'
+          AND channel_message_id IS NOT NULL
+        ORDER BY updated_at DESC, rowid DESC
+        LIMIT 1
+      `,
+      )
+      .get(input.chatId, input.body, input.audience) as { channel_message_id: string } | undefined;
+    return row?.channel_message_id;
   }
 
   isSentCardMessage(
@@ -1859,6 +2045,28 @@ export class BridgeDatabase {
     }
     this.database
       .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(10, ?)")
+      .run(new Date().toISOString());
+  }
+
+  private migratePendingFeishuTopics(): void {
+    const applied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 11")
+      .get();
+    if (applied) return;
+    this.database.exec(`CREATE TABLE IF NOT EXISTS feishu_pending_topics (
+      topic_root_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(project_id),
+      chat_id TEXT NOT NULL,
+      owner_open_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(chat_id, topic_root_id),
+      FOREIGN KEY(project_id) REFERENCES feishu_project_spaces(project_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_feishu_pending_topics_project
+      ON feishu_pending_topics(project_id, updated_at DESC);`);
+    this.database
+      .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(11, ?)")
       .run(new Date().toISOString());
   }
 }

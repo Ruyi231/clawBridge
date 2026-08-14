@@ -33,6 +33,8 @@ describe("parseCardAction", () => {
       { version: 1, action: "project.list", page: 1_000 },
       { version: 1, action: "project.use", projectId: "desktop@abc-123" },
       { version: 1, action: "project.space", projectId: "claw" },
+      { version: 1, action: "project.leave", projectId: "claw" },
+      { version: 1, action: "project.dissolve", projectId: "claw" },
       { version: 1, action: "task.list" },
       { version: 1, action: "task.list", projectId: "claw", page: 3 },
       { version: 1, action: "thread.list", projectId: "claw" },
@@ -117,41 +119,21 @@ describe("Feishu card rendering", () => {
     expect(card.header.title.content).toBe("ClawBridge 控制台");
     expect(actions(card).map((item) => item.action)).toEqual([
       "project.list",
-      "thread.list",
-      "project.space",
-      "thread.new",
-      "task.list",
-      "task.list",
-      "model.list",
       "menu.refresh",
+      "project.space",
       "chat.close",
-      "task.stop",
     ]);
     const actionRows = card.elements.filter((element) => element.tag === "action");
-    expect(actionRows).toHaveLength(6);
-    expect(actionRows.map((row) => row.layout)).toEqual([
-      "bisected",
-      "bisected",
-      "bisected",
-      "flow",
-      "bisected",
-      "flow",
-    ]);
+    expect(actionRows).toHaveLength(3);
+    expect(actionRows.map((row) => row.layout)).toEqual(["bisected", "flow", "flow"]);
     expect(
       actionRows.map((row) =>
         (row.actions as Array<{ text: { content: string } }>).map((item) => item.text.content),
       ),
-    ).toEqual([
-      ["选择项目", "选择对话"],
-      ["项目群", "新对话"],
-      ["全部任务", "项目任务"],
-      ["模型设置"],
-      ["刷新", "交还桌面"],
-      ["停止任务"],
-    ]);
+    ).toEqual([["选择项目", "刷新"], ["项目群"], ["交还桌面"]]);
     expect(actionRows.every((row) => (row.actions as unknown[]).length <= 2)).toBe(true);
     const summary = card.elements[0] as { text: { content: string } };
-    expect(summary.text.content).toContain("修复 \\*卡片\\* \\[测试\\]");
+    expect(summary.text.content).toContain("本控制台只负责选择项目和进入项目群");
     expect(JSON.stringify(card)).not.toContain("D:\\");
   });
 
@@ -160,18 +142,34 @@ describe("Feishu card rendering", () => {
     expect(actions(card).map((item) => item.action)).toEqual([
       "project.list",
       "menu.refresh",
-      "task.list",
-      "task.stop",
       "chat.close",
     ]);
     const actionRows = card.elements.filter((element) => element.tag === "action");
-    expect(actionRows.map((row) => row.layout)).toEqual(["bisected", "bisected", "flow"]);
+    expect(actionRows.map((row) => row.layout)).toEqual(["bisected", "flow"]);
     expect(
       actionRows.map((row) =>
         (row.actions as Array<{ text: { content: string } }>).map((item) => item.text.content),
       ),
-    ).toEqual([["选择项目", "刷新"], ["全部任务", "停止任务"], ["交还桌面"]]);
+    ).toEqual([["选择项目", "刷新"], ["交还桌面"]]);
     expect(actionRows.every((row) => (row.actions as unknown[]).length <= 2)).toBe(true);
+  });
+
+  it("renders a one-click AppLink when the project group is ready", () => {
+    const projectSpaceUrl =
+      "https://applink.feishu.cn/client/chat/open?openChatId=oc_project_ready";
+    const card = renderHomeCard({
+      project: { id: "demo", name: "Demo" },
+      thread: null,
+      projectSpaceUrl,
+    });
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain(projectSpaceUrl);
+    expect(serialized).toContain(`\"pc_url\":\"${projectSpaceUrl}\"`);
+    expect(serialized).toContain(`\"android_url\":\"${projectSpaceUrl}\"`);
+    expect(serialized).toContain(`\"ios_url\":\"${projectSpaceUrl}\"`);
+    expect(actions(card).map((item) => item.action)).not.toContain("project.space");
+    expect(serialized).toContain("项目群");
   });
 
   it("renders project controls in the group without exposing cross-project actions", () => {
@@ -190,11 +188,23 @@ describe("Feishu card rendering", () => {
       "thread.new",
       "task.list",
       "model.list",
+      "project.dissolve",
     ]);
     expect(actions(card).every((item) => !("projectId" in item) || item.projectId === "demo")).toBe(
       true,
     );
     expect(JSON.stringify(card)).toContain("任务请进入对应的独立话题");
+  });
+
+  it("requires confirmation before exiting and discarding a project group", () => {
+    const card = renderProjectSpaceCard({
+      project: { id: "demo", name: "Demo" },
+    });
+    expect(actions(card).map((item) => item.action)).toContain("project.dissolve");
+    expect(actions(card).map((item) => item.action)).not.toContain("project.leave");
+    expect(JSON.stringify(card)).toContain("确认退出并丢弃项目群");
+    expect(JSON.stringify(card)).toContain("下次进入会新建空群");
+    expect(JSON.stringify(card)).toContain("Codex 本地项目与对话历史会保留");
   });
 
   it("refuses to render a filesystem path as an action project ID", () => {
@@ -282,7 +292,7 @@ describe("Feishu card rendering", () => {
     const cardActions = actions(card);
 
     expect(cardActions.filter((item) => item.action === "thread.use")).toHaveLength(10);
-    expect(cardActions.filter((item) => item.action === "thread.show")).toHaveLength(10);
+    expect(cardActions.filter((item) => item.action === "thread.show")).toHaveLength(0);
     expect(cardActions).not.toContainEqual(expect.objectContaining({ threadId: "other-thread" }));
     expect(JSON.stringify(card)).toContain("本页最多显示 10 个对话");
   });

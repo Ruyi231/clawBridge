@@ -4,6 +4,8 @@ export interface ChannelAdapter {
   start(onEvent: (event: InboundEvent) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
   send(message: OutboundMessage): Promise<string>;
+  /** Replace a bot-authored interactive card without sending a new chat message. */
+  updateCardMessage?(messageId: string, card: Record<string, unknown>): Promise<void>;
   onFatalError?(handler: (error: Error) => void): void;
   createProjectSpace?(input: {
     projectId: string;
@@ -15,13 +17,17 @@ export interface ChannelAdapter {
     status: "ready" | "owner_absent" | "dissolved" | "missing";
     displayName?: string;
     messageMode?: "chat" | "thread";
+    canConfigure?: boolean;
   }>;
   addProjectSpaceMember?(input: { chatId: string; ownerOpenId: string }): Promise<void>;
+  removeProjectSpaceMember?(input: { chatId: string; ownerOpenId: string }): Promise<void>;
+  deleteProjectSpace?(input: { chatId: string }): Promise<void>;
   configureProjectSpace?(input: { chatId: string }): Promise<void>;
   createProjectTopic?(input: {
     chatId: string;
     title: string;
     idempotencyKey: string;
+    historyMessages?: string[];
   }): Promise<{ topicRootId: string }>;
   startTaskStream?(input: {
     chatId: string;

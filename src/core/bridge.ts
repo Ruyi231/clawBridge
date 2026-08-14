@@ -1,6 +1,6 @@
 import path from "node:path";
 import { mkdir, rm, stat } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { ChannelAdapter } from "../channels/channel-adapter.js";
 import {
@@ -218,7 +218,11 @@ export class Bridge {
             );
           }
           const route = database.resolveFeishuThreadRoute(event.chatId, event.topicRootId);
-          if (!route || route.ownerOpenId !== event.senderOpenId) {
+          const pending = database.resolveFeishuPendingTopic(event.chatId, event.topicRootId);
+          if (
+            (!route || route.ownerOpenId !== event.senderOpenId) &&
+            (!pending || pending.ownerOpenId !== event.senderOpenId)
+          ) {
             throw new BridgeError("UNAUTHORIZED", "Project topic is not registered");
           }
         } else {
@@ -295,9 +299,20 @@ export class Bridge {
         message.chatId,
         message.topicRootId!,
       );
-      if (!route) throw new Error("项目话题尚未绑定 Codex 对话");
-      this.dependencies.database.selectProject(message.chatId, route.projectId);
-      this.dependencies.database.setThread(message.chatId, route.projectId, route.threadId);
+      const pending = this.dependencies.database.resolveFeishuPendingTopic(
+        message.chatId,
+        message.topicRootId!,
+      );
+      const projectId = route?.projectId ?? pending?.projectId;
+      if (!projectId) throw new Error("项目话题尚未注册");
+      this.dependencies.database.selectProject(message.chatId, projectId);
+      if (route) {
+        this.dependencies.database.setThread(message.chatId, projectId, route.threadId);
+      } else {
+        // A new Feishu topic intentionally has no Codex thread until its first
+        // real task. This avoids creating an unmaterialized empty rollout.
+        this.dependencies.database.clearThread(message.chatId, projectId);
+      }
     }
     const command = parseCommand(message.text);
     const requestsCardMenu =
@@ -315,7 +330,7 @@ export class Bridge {
       if (message.chatType === "group") {
         this.reply(
           message.chatId,
-          "项目话题中请直接发送任务；项目、对话和系统管理请在机器人单聊控制台操作。",
+          "项目话题中请直接发送任务；对话、任务和模型管理请使用项目群控制卡。",
         );
         return;
       }
@@ -531,6 +546,20 @@ export class Bridge {
           });
           database.setThread(task.chatId, task.projectId, startedThreadId);
           database.updateTask(task.id, "running", { threadId: startedThreadId });
+          if (task.replyToMessageId) {
+            const pendingTopic = database.resolveFeishuPendingTopic(
+              task.chatId,
+              task.replyToMessageId,
+            );
+            if (pendingTopic?.projectId === task.projectId) {
+              database.promoteFeishuPendingTopic({
+                projectId: task.projectId,
+                chatId: task.chatId,
+                topicRootId: task.replyToMessageId,
+                threadId: startedThreadId,
+              });
+            }
+          }
           this.activeTasks.set(task.chatId, {
             taskId: task.id,
             projectId: task.projectId,
@@ -563,10 +592,12 @@ export class Bridge {
           }
         },
       });
+      let streamFinalized = false;
       try {
         await streamPump?.close(result.finalText);
         if (streamId && channel.finishTaskStream) {
           await channel.finishTaskStream(streamId, `${project.name} · 已完成`);
+          streamFinalized = true;
         }
       } catch (streamError) {
         logger.warn({ err: streamError, taskId: task.id }, "Failed to finalize task stream");
@@ -580,17 +611,19 @@ export class Bridge {
       });
       database.setThread(task.chatId, task.projectId, result.threadId);
       database.updateTask(task.id, "completed", { threadId: result.threadId });
-      this.reply(
-        task.chatId,
-        renderFinalReply({
-          state: "completed",
-          text: result.finalText,
-          projectId: project.name,
-          threadId: result.threadId,
-        }),
-        task.id,
-        task.replyToMessageId,
-      );
+      if (!streamFinalized) {
+        this.reply(
+          task.chatId,
+          renderFinalReply({
+            state: "completed",
+            text: result.finalText,
+            projectId: project.name,
+            threadId: result.threadId,
+          }),
+          task.id,
+          task.replyToMessageId,
+        );
+      }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       try {
@@ -730,13 +763,18 @@ export class Bridge {
 
     switch (action.action) {
       case "menu.refresh":
-        await this.showHomeCard(event.chatId);
+        await this.showHomeCard(event.chatId, undefined, event.messageId);
         return;
       case "project.list":
-        await this.showProjectCard(event.chatId, action.page ?? 0);
+        await this.showProjectCard(event.chatId, action.page ?? 0, event.messageId);
         return;
       case "project.create.show":
-        this.replyCard(event.chatId, renderProjectCreateCard(), "新建项目");
+        await this.updateOrReplyCard(
+          event.messageId,
+          event.chatId,
+          renderProjectCreateCard(),
+          "新建项目",
+        );
         return;
       case "project.create": {
         const rawName = event.formValue?.projectName;
@@ -748,66 +786,114 @@ export class Bridge {
         const projectId = `mobile-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}`;
         const project = await this.projectManager.createProject(projectId, name);
         this.dependencies.database.selectProject(event.chatId, project.id);
-        await this.openProjectSpace(event.chatId, event.senderOpenId, project.id);
+        await this.openProjectSpace(event.chatId, event.senderOpenId, project.id, event.messageId);
         return;
       }
       case "project.use":
-        await this.runProjectCommand(event.chatId, {
-          group: "project",
-          action: "use",
-          projectId: action.projectId,
-          clearThread: false,
-        });
-        await this.showHomeCard(event.chatId, "项目已切换");
+        await this.runProjectCommand(
+          event.chatId,
+          {
+            group: "project",
+            action: "use",
+            projectId: action.projectId,
+            clearThread: false,
+          },
+          true,
+        );
+        await this.openProjectSpace(
+          event.chatId,
+          event.senderOpenId,
+          action.projectId,
+          event.messageId,
+        );
         return;
       case "project.space":
-        await this.openProjectSpace(event.chatId, event.senderOpenId, action.projectId);
+        await this.openProjectSpace(
+          event.chatId,
+          event.senderOpenId,
+          action.projectId,
+          event.messageId,
+        );
+        return;
+      case "project.leave":
+        await this.leaveProjectSpace(event.chatId, action.projectId, event.messageId);
+        return;
+      case "project.dissolve":
+        await this.dissolveProjectSpace(event.chatId, action.projectId);
         return;
       case "thread.list":
         await this.ensureCardProjectSelected(event.chatId, action.projectId);
-        await this.showThreadCard(event.chatId, action.projectId, action.page ?? 0);
+        await this.showThreadCard(
+          event.chatId,
+          action.projectId,
+          action.page ?? 0,
+          event.messageId,
+        );
         return;
       case "thread.use":
         await this.ensureCardProjectSelected(event.chatId, action.projectId);
-        await this.runChatCommand(event.chatId, {
-          group: "chat",
-          action: "use",
-          reference: action.threadId,
-        });
-        if (this.dependencies.database.getFeishuProjectSpaceByChat(event.chatId)) {
-          await this.openProjectSpace(event.chatId, event.senderOpenId, action.projectId);
-        } else {
-          await this.showHomeCard(event.chatId, "对话已选择");
-        }
+        await this.runChatCommand(
+          event.chatId,
+          {
+            group: "chat",
+            action: "use",
+            reference: action.threadId,
+          },
+          { announce: false },
+        );
+        await this.openProjectSpace(
+          event.chatId,
+          event.senderOpenId,
+          action.projectId,
+          event.messageId,
+        );
         return;
       case "thread.new":
         await this.ensureCardProjectSelected(event.chatId, action.projectId);
-        await this.runChatCommand(event.chatId, {
-          group: "chat",
-          action: "new",
-          lazy: false,
-        });
-        await this.openProjectSpace(event.chatId, event.senderOpenId, action.projectId);
+        await this.createPendingProjectTopic(
+          event.chatId,
+          event.senderOpenId,
+          action.projectId,
+          event.messageId,
+        );
         return;
       case "thread.show":
         await this.ensureCardProjectSelected(event.chatId, action.projectId);
-        await this.runChatCommand(event.chatId, {
-          group: "chat",
-          action: "show",
-          reference: action.threadId,
-        });
+        await this.runChatCommand(
+          event.chatId,
+          { group: "chat", action: "use", reference: action.threadId },
+          { announce: false },
+        );
+        await this.openProjectSpace(
+          event.chatId,
+          event.senderOpenId,
+          action.projectId,
+          event.messageId,
+        );
         return;
       case "task.stop":
         await this.runStop(event.chatId);
         return;
       case "task.list":
-        await this.showTaskCenter(event.chatId, action.projectId, action.page ?? 0);
+        await this.showTaskCenter(
+          event.chatId,
+          action.projectId,
+          action.page ?? 0,
+          event.messageId,
+        );
         return;
       case "model.list":
-        await this.showModelCard(event.chatId, action.projectId, action.threadId);
+        await this.showModelCard(event.chatId, action.projectId, action.threadId, event.messageId);
         return;
       case "model.use":
-        await this.setModelSettings(event.chatId, action.projectId, action.threadId, action.model);
+        await this.setModelSettings(
+          event.chatId,
+          action.projectId,
+          action.threadId,
+          action.model,
+          undefined,
+          event.messageId,
+        );
         return;
       case "reasoning.use":
         await this.setModelSettings(
@@ -816,6 +902,7 @@ export class Bridge {
           action.threadId,
           action.model,
           action.reasoningEffort,
+          event.messageId,
         );
         return;
       case "approval.resolve":
@@ -833,12 +920,16 @@ export class Bridge {
   private async ensureCardProjectSelected(chatId: string, projectId: string): Promise<void> {
     const conversation = this.dependencies.database.getConversation(chatId);
     if (conversation?.projectId === projectId) return;
-    await this.runProjectCommand(chatId, {
-      group: "project",
-      action: "use",
-      projectId,
-      clearThread: false,
-    });
+    await this.runProjectCommand(
+      chatId,
+      {
+        group: "project",
+        action: "use",
+        projectId,
+        clearThread: false,
+      },
+      true,
+    );
   }
 
   private findActiveTask(threadId: string, turnId: string): TaskRecord | undefined {
@@ -989,6 +1080,8 @@ export class Bridge {
     controlChatId: string,
     ownerOpenId: string,
     projectId: string,
+    controlMessageId?: string,
+    options?: { skipHistoryForThreadId?: string },
   ): Promise<void> {
     const { channel, database } = this.dependencies;
     const project = database.getProject(projectId);
@@ -997,20 +1090,76 @@ export class Bridge {
     }
     let space = database.getFeishuProjectSpace(projectId);
     let notice: string | undefined;
+    let spaceReplaced = false;
     if (space && channel.inspectProjectSpace) {
-      const inspection = await channel.inspectProjectSpace({
-        chatId: space.chatId,
-        ownerOpenId,
-      });
-      if (inspection.status === "owner_absent") {
+      let inspection:
+        | Awaited<ReturnType<NonNullable<typeof channel.inspectProjectSpace>>>
+        | undefined;
+      try {
+        inspection = await channel.inspectProjectSpace({
+          chatId: space.chatId,
+          ownerOpenId,
+        });
+      } catch (error) {
+        if (!channel.createProjectSpace) {
+          throw new Error(`无法检查原项目群，也无法重建：${this.errorDetail(error)}`);
+        }
+        this.dependencies.logger.warn(
+          { err: error, projectId, chatId: space.chatId },
+          "Could not inspect the previous Feishu project group; rebuilding it",
+        );
+        try {
+          const created = await channel.createProjectSpace({
+            projectId,
+            projectName: project.name,
+            ownerOpenId,
+            idempotencyKey: `clawbridge-inspect-${randomUUID()}`,
+          });
+          space = database.replaceFeishuProjectSpace({
+            projectId,
+            chatId: created.chatId,
+            ownerOpenId,
+            displayName: created.displayName,
+          });
+          spaceReplaced = true;
+          notice = "原项目群已无法访问，已新建项目群；Codex 对话历史仍保留";
+        } catch (createError) {
+          throw new Error(
+            `原项目群已无法访问，自动新建项目群也失败：${this.errorDetail(createError)}`,
+          );
+        }
+      }
+      if (inspection?.status === "owner_absent") {
         if (!channel.addProjectSpaceMember) {
           throw new Error(
             "你已经退出原项目群，但当前消息通道不能自动重新邀请。请开通飞书“添加、移除群成员”权限后重试。",
           );
         }
-        await channel.addProjectSpaceMember({ chatId: space.chatId, ownerOpenId });
-        notice = "已重新邀请你加入原项目群，原有对话话题保持不变";
-      } else if (inspection.status === "dissolved" || inspection.status === "missing") {
+        try {
+          await channel.addProjectSpaceMember({ chatId: space.chatId, ownerOpenId });
+          notice = "已重新邀请你加入原项目群，原有对话话题保持不变";
+        } catch (error) {
+          if (!channel.createProjectSpace) throw error;
+          this.dependencies.logger.warn(
+            { err: error, projectId, chatId: space.chatId },
+            "Could not rejoin the previous Feishu project group; rebuilding it",
+          );
+          const created = await channel.createProjectSpace({
+            projectId,
+            projectName: project.name,
+            ownerOpenId,
+            idempotencyKey: `clawbridge-rejoin-${randomUUID()}`,
+          });
+          space = database.replaceFeishuProjectSpace({
+            projectId,
+            chatId: created.chatId,
+            ownerOpenId,
+            displayName: created.displayName,
+          });
+          spaceReplaced = true;
+          notice = "原项目群无法重新加入，已新建项目群；Codex 对话历史仍保留";
+        }
+      } else if (inspection?.status === "dissolved" || inspection?.status === "missing") {
         if (!channel.createProjectSpace) throw new Error("当前消息通道不支持重建项目群。");
         const created = await channel.createProjectSpace({
           projectId,
@@ -1024,8 +1173,9 @@ export class Bridge {
           ownerOpenId,
           displayName: created.displayName,
         });
+        spaceReplaced = true;
         notice = "原项目群已失效，已重建项目群；Codex 对话历史仍保留，进入对话时会重建话题";
-      } else if (inspection.displayName && inspection.displayName !== space.displayName) {
+      } else if (inspection?.displayName && inspection.displayName !== space.displayName) {
         space = database.bindFeishuProjectSpace({
           projectId,
           chatId: space.chatId,
@@ -1033,11 +1183,27 @@ export class Bridge {
           displayName: inspection.displayName,
         });
       }
-      if (inspection.messageMode === "thread" && channel.configureProjectSpace) {
-        await channel.configureProjectSpace({ chatId: space.chatId });
-        notice = notice
-          ? `${notice}；项目群已切换为“群内控制 + 对话话题”模式`
-          : "项目群已切换为“群内控制 + 对话话题”模式";
+      if (!spaceReplaced && inspection?.messageMode === "thread" && channel.configureProjectSpace) {
+        if (inspection.canConfigure === false) {
+          notice = notice
+            ? `${notice}；项目群仍为话题模式，请将机器人设为群管理员后重新打开项目群`
+            : "项目群仍为话题模式，请将机器人设为群管理员后重新打开项目群";
+        } else {
+          try {
+            await channel.configureProjectSpace({ chatId: space.chatId });
+            notice = notice
+              ? `${notice}；项目群已切换为“群内控制 + 对话话题”模式`
+              : "项目群已切换为“群内控制 + 对话话题”模式";
+          } catch (error) {
+            this.dependencies.logger.warn(
+              { err: error, projectId, chatId: space.chatId },
+              "Could not migrate the legacy Feishu project group message mode",
+            );
+            notice = notice
+              ? `${notice}；项目群模式暂未迁移，但现有项目群仍可继续使用`
+              : "项目群模式暂未迁移，但现有项目群仍可继续使用";
+          }
+        }
       }
     }
     if (!space) {
@@ -1064,30 +1230,66 @@ export class Bridge {
         : undefined;
     if (thread && !database.getFeishuThreadRoute(thread.threadId)) {
       if (!channel.createProjectTopic) throw new Error("当前消息通道不支持创建项目话题。");
-      const created = await channel.createProjectTopic({
-        chatId: space.chatId,
-        title: thread.title || `对话 #${thread.localNumber}`,
-        idempotencyKey: `clawbridge-thread-${thread.threadId}`,
-      });
-      database.bindFeishuThreadRoute({
-        threadId: thread.threadId,
-        projectId,
-        chatId: space.chatId,
-        topicRootId: created.topicRootId,
-        ownerOpenId,
-      });
       database.selectProject(space.chatId, projectId);
       database.setThread(space.chatId, projectId, thread.threadId);
-      this.showProjectSpaceCard(
+      try {
+        let historyMessages: string[] = [];
+        try {
+          const projectRoot = await this.resolveRuntimeProjectPath(project.rootPath);
+          if (thread.threadId !== options?.skipHistoryForThreadId) {
+            const details = await this.dependencies.codex.readThreadDetails(thread.threadId, true);
+            await this.validateThreadProject(details, projectRoot, project.id);
+            historyMessages = this.renderTopicHistory(details);
+          }
+        } catch (error) {
+          if (!this.isMissingRolloutError(error)) throw error;
+        }
+        const created = await channel.createProjectTopic({
+          chatId: space.chatId,
+          title: thread.title || `对话 #${thread.localNumber}`,
+          idempotencyKey: `clawbridge-topic-${createHash("sha256")
+            .update(`${space.chatId}\0${thread.threadId}`)
+            .digest("hex")
+            .slice(0, 32)}`,
+          historyMessages,
+        });
+        database.bindFeishuThreadRoute({
+          threadId: thread.threadId,
+          projectId,
+          chatId: space.chatId,
+          topicRootId: created.topicRootId,
+          ownerOpenId,
+        });
+      } catch (error) {
+        const topicNotice = `项目群已打开，但当前对话话题创建失败：${this.errorDetail(error)}。可稍后再次点击“项目群”重试`;
+        this.dependencies.logger.warn(
+          { err: error, projectId, chatId: space.chatId, threadId: thread.threadId },
+          "Could not create the Feishu project topic",
+        );
+        await this.showProjectSpaceCard(
+          space.chatId,
+          project,
+          thread,
+          topicNotice,
+          controlChatId === space.chatId ? controlMessageId : undefined,
+        );
+        if (controlChatId !== space.chatId) {
+          await this.showHomeCard(controlChatId, topicNotice, controlMessageId);
+        }
+        return;
+      }
+      await this.showProjectSpaceCard(
         space.chatId,
         project,
         thread,
         `对话 #${thread.localNumber} 已建立话题`,
+        controlChatId === space.chatId ? controlMessageId : undefined,
       );
       if (controlChatId !== space.chatId) {
         await this.showHomeCard(
           controlChatId,
           `${notice ? `${notice}；` : "项目群已就绪，"}对话 #${thread.localNumber} 已建立话题`,
+          controlMessageId,
         );
       }
       return;
@@ -1096,7 +1298,13 @@ export class Bridge {
       database.selectProject(space.chatId, projectId);
       database.setThread(space.chatId, projectId, thread.threadId);
     }
-    this.showProjectSpaceCard(space.chatId, project, thread, notice);
+    await this.showProjectSpaceCard(
+      space.chatId,
+      project,
+      thread,
+      notice,
+      controlChatId === space.chatId ? controlMessageId : undefined,
+    );
     if (controlChatId !== space.chatId) {
       await this.showHomeCard(
         controlChatId,
@@ -1105,38 +1313,156 @@ export class Bridge {
           : notice
             ? `${notice}；请在项目群中选择或新建对话`
             : "项目群已经存在；请在项目群中选择或新建对话",
+        controlMessageId,
       );
     }
   }
 
-  private showProjectSpaceCard(
+  private async createPendingProjectTopic(
+    controlChatId: string,
+    ownerOpenId: string,
+    projectId: string,
+    controlMessageId?: string,
+  ): Promise<void> {
+    const { channel, database } = this.dependencies;
+    const project = database.getProject(projectId);
+    if (!project?.enabled || !this.isDesktopProjectAuthorized(project)) {
+      throw new Error("项目不存在或已停用，请刷新项目列表。");
+    }
+    let space = database.getFeishuProjectSpace(projectId);
+    if (!space) {
+      await this.openProjectSpace(controlChatId, ownerOpenId, projectId, controlMessageId);
+      space = database.getFeishuProjectSpace(projectId);
+    }
+    if (!space) throw new Error("项目群尚未创建，请返回单聊控制台重新选择项目。");
+    if (!channel.createProjectTopic) throw new Error("当前消息通道不支持创建项目话题。");
+
+    const created = await channel.createProjectTopic({
+      chatId: space.chatId,
+      title: "新对话",
+      idempotencyKey: `clawbridge-new-topic-${randomUUID()}`,
+      historyMessages: [],
+    });
+    database.bindFeishuPendingTopic({
+      projectId,
+      chatId: space.chatId,
+      topicRootId: created.topicRootId,
+      ownerOpenId,
+    });
+    database.selectProject(space.chatId, projectId);
+    database.clearThread(space.chatId, projectId);
+    await this.showProjectSpaceCard(
+      space.chatId,
+      project,
+      undefined,
+      "新对话话题已创建。请进入该话题发送第一条任务，届时才会创建真实 Codex 对话。",
+      controlChatId === space.chatId ? controlMessageId : undefined,
+    );
+    if (controlChatId !== space.chatId) {
+      await this.showHomeCard(
+        controlChatId,
+        "新对话话题已创建，请进入项目群中的新话题发送第一条任务。",
+        controlMessageId,
+      );
+    }
+  }
+
+  private async leaveProjectSpace(
+    chatId: string,
+    projectId: string,
+    messageId?: string,
+  ): Promise<void> {
+    const { database } = this.dependencies;
+    const space = database.getFeishuProjectSpaceByChat(chatId);
+    if (!space || space.projectId !== projectId) {
+      throw new Error("该卡片不属于当前项目群，请刷新后重试。");
+    }
+    const project = database.getProject(projectId);
+    if (!project) throw new Error(`找不到项目 ${projectId}`);
+    const conversation = database.getConversation(chatId);
+    const thread = conversation?.threadId
+      ? database.getProjectThread(projectId, conversation.threadId)
+      : undefined;
+    await this.showProjectSpaceCard(
+      chatId,
+      project,
+      thread,
+      "退出现在会彻底丢弃当前飞书项目群。请使用下方“退出并丢弃项目群”并完成二次确认；Codex 本地对话历史不会删除",
+      messageId,
+    );
+  }
+
+  private async dissolveProjectSpace(chatId: string, projectId: string): Promise<void> {
+    const { channel, database } = this.dependencies;
+    const space = database.getFeishuProjectSpaceByChat(chatId);
+    if (!space || space.projectId !== projectId) {
+      throw new Error("该卡片不属于当前项目群，请刷新后重试。");
+    }
+    if (!channel.deleteProjectSpace) {
+      throw new Error("当前消息通道不支持解散项目群。");
+    }
+    const controlChatIds = database
+      .listChatIdsForSelectedProject(projectId)
+      .filter((candidate) => candidate !== chatId);
+    await channel.deleteProjectSpace({ chatId });
+    database.deleteFeishuProjectSpace(projectId);
+    for (const controlChatId of controlChatIds) {
+      database.clearSelectedProject(controlChatId, projectId);
+      const controlMessageId = database.getLatestSentCardMessageId({
+        chatId: controlChatId,
+        body: "ClawBridge 控制台",
+        audience: "p2p",
+      });
+      await this.showHomeCard(
+        controlChatId,
+        "项目群已彻底丢弃。请重新选择项目；选择后会先创建全新的空项目群，再提供一次点击即可进入的入口。",
+        controlMessageId,
+      );
+    }
+  }
+
+  private async showProjectSpaceCard(
     chatId: string,
     project: ProjectRecord,
     thread?: ThreadIndexRecord,
     notice?: string,
-  ): void {
-    this.replyCard(
-      chatId,
-      renderProjectSpaceCard({
-        project: { id: project.id, name: project.name },
-        thread: thread
-          ? {
-              id: thread.threadId,
-              projectId: thread.projectId,
-              localNumber: thread.localNumber,
-              title: thread.title,
-              preview: thread.preview,
-              status: thread.status,
-            }
-          : null,
-        ...(notice ? { notice } : {}),
-      }),
-      `${project.name} 项目控制台`,
-      "group",
-    );
+    replaceMessageId?: string,
+  ): Promise<void> {
+    const fallbackText = `${project.name} 项目控制台`;
+    const card = renderProjectSpaceCard({
+      project: { id: project.id, name: project.name },
+      thread: thread
+        ? {
+            id: thread.threadId,
+            projectId: thread.projectId,
+            localNumber: thread.localNumber,
+            title: thread.title,
+            preview: thread.preview,
+            status: thread.status,
+          }
+        : null,
+      ...(notice ? { notice } : {}),
+    });
+    const existingMessageId =
+      replaceMessageId ??
+      this.dependencies.database.getLatestSentCardMessageId({
+        chatId,
+        body: fallbackText,
+        audience: "group",
+      });
+    if (existingMessageId) {
+      await this.updateOrReplyCard(existingMessageId, chatId, card, fallbackText);
+      return;
+    }
+    this.replyCard(chatId, card, fallbackText, "group");
+    await this.drainDeliveries();
   }
 
-  private async showHomeCard(chatId: string, notice?: string): Promise<void> {
+  private async showHomeCard(
+    chatId: string,
+    notice?: string,
+    replaceMessageId?: string,
+  ): Promise<void> {
     await this.refreshDesktopProjects();
     const { database } = this.dependencies;
     const conversation = database.getConversation(chatId);
@@ -1155,52 +1481,65 @@ export class Bridge {
         : this.codexClosing
           ? "正在交还 Desktop"
           : "空闲";
-    this.replyCard(
-      chatId,
-      renderHomeCard({
-        project: project ? { id: project.id, name: project.name } : null,
-        thread: thread
-          ? {
-              id: thread.threadId,
-              projectId: thread.projectId,
-              localNumber: thread.localNumber,
-              title: thread.title,
-              preview: thread.preview,
-              status: thread.status,
-            }
-          : null,
-        taskState,
-        ...(notice ? { notice } : {}),
-      }),
-      "ClawBridge 控制台",
-    );
+    const projectSpace = project ? database.getFeishuProjectSpace(project.id) : undefined;
+    const card = renderHomeCard({
+      project: project ? { id: project.id, name: project.name } : null,
+      thread: thread
+        ? {
+            id: thread.threadId,
+            projectId: thread.projectId,
+            localNumber: thread.localNumber,
+            title: thread.title,
+            preview: thread.preview,
+            status: thread.status,
+          }
+        : null,
+      taskState,
+      ...(projectSpace
+        ? {
+            projectSpaceUrl: `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(projectSpace.chatId)}`,
+          }
+        : {}),
+      ...(notice ? { notice } : {}),
+    });
+    if (replaceMessageId) {
+      await this.updateOrReplyCard(replaceMessageId, chatId, card, "ClawBridge 控制台");
+    } else {
+      this.replyCard(chatId, card, "ClawBridge 控制台");
+    }
   }
 
-  private async showProjectCard(chatId: string, requestedPage = 0): Promise<void> {
+  private async showProjectCard(
+    chatId: string,
+    requestedPage = 0,
+    replaceMessageId?: string,
+  ): Promise<void> {
     await this.refreshDesktopProjects();
     const projects = this.orderedProjects(false);
     const totalPages = Math.max(1, Math.ceil(projects.length / 10));
     const page = Math.min(requestedPage, totalPages - 1);
     const offset = page * 10;
     const selectedProjectId = this.dependencies.database.getConversation(chatId)?.projectId ?? null;
-    this.replyCard(
-      chatId,
-      renderProjectListCard({
-        projects: projects
-          .slice(offset, offset + 10)
-          .map((project) => ({ id: project.id, name: project.name })),
-        selectedProjectId,
-        page,
-        totalPages,
-      }),
-      "选择项目",
-    );
+    const card = renderProjectListCard({
+      projects: projects
+        .slice(offset, offset + 10)
+        .map((project) => ({ id: project.id, name: project.name })),
+      selectedProjectId,
+      page,
+      totalPages,
+    });
+    if (replaceMessageId) {
+      await this.updateOrReplyCard(replaceMessageId, chatId, card, "选择项目");
+    } else {
+      this.replyCard(chatId, card, "选择项目");
+    }
   }
 
   private async showTaskCenter(
     chatId: string,
     projectId?: string,
     requestedPage = 0,
+    replaceMessageId?: string,
   ): Promise<void> {
     const { database } = this.dependencies;
     const project = projectId ? database.getProject(projectId) : undefined;
@@ -1208,27 +1547,34 @@ export class Bridge {
     const rows = database.listTasks({ ...(projectId ? { projectId } : {}), limit: 100 });
     const totalPages = Math.max(1, Math.ceil(rows.length / 10));
     const page = Math.min(requestedPage, totalPages - 1);
-    this.replyCard(
-      chatId,
-      renderTaskCenterCard({
-        tasks: rows.slice(page * 10, page * 10 + 10).map((task) => ({
-          id: task.id,
-          projectName: database.getProject(task.projectId)?.name ?? task.projectId,
-          state: task.state,
-          prompt: task.prompt,
-          progressSummary: task.progressSummary,
-          updatedAt: task.updatedAt,
-        })),
-        ...(project ? { project: { id: project.id, name: project.name } } : {}),
-        page,
-        totalPages,
-        projectSpace: Boolean(database.getFeishuProjectSpaceByChat(chatId)),
-      }),
-      project ? "项目任务中心" : "全局任务中心",
-    );
+    const card = renderTaskCenterCard({
+      tasks: rows.slice(page * 10, page * 10 + 10).map((task) => ({
+        id: task.id,
+        projectName: database.getProject(task.projectId)?.name ?? task.projectId,
+        state: task.state,
+        prompt: task.prompt,
+        progressSummary: task.progressSummary,
+        updatedAt: task.updatedAt,
+      })),
+      ...(project ? { project: { id: project.id, name: project.name } } : {}),
+      page,
+      totalPages,
+      projectSpace: Boolean(database.getFeishuProjectSpaceByChat(chatId)),
+    });
+    const fallbackText = project ? "项目任务中心" : "全局任务中心";
+    if (replaceMessageId) {
+      await this.updateOrReplyCard(replaceMessageId, chatId, card, fallbackText);
+    } else {
+      this.replyCard(chatId, card, fallbackText);
+    }
   }
 
-  private async showModelCard(chatId: string, projectId: string, threadId: string): Promise<void> {
+  private async showModelCard(
+    chatId: string,
+    projectId: string,
+    threadId: string,
+    replaceMessageId?: string,
+  ): Promise<void> {
     const { database, codex } = this.dependencies;
     const conversation = database.getConversation(chatId);
     if (conversation?.projectId !== projectId || conversation.threadId !== threadId) {
@@ -1242,24 +1588,25 @@ export class Bridge {
     this.assertNotStopping();
     const current = database.getThreadExecutionSettings(threadId);
     const defaultModel = models.find((model) => model.isDefault) ?? models[0];
-    this.replyCard(
-      chatId,
-      renderModelListCard({
-        project: { id: project.id, name: project.name },
-        thread: {
-          id: thread.threadId,
-          projectId: thread.projectId,
-          localNumber: thread.localNumber,
-          title: thread.title,
-        },
-        models,
-        selectedModel: current?.model ?? defaultModel?.model ?? null,
-        selectedReasoningEffort:
-          current?.reasoningEffort ?? defaultModel?.defaultReasoningEffort ?? null,
-        projectSpace: Boolean(database.getFeishuProjectSpaceByChat(chatId)),
-      }),
-      "模型与推理强度",
-    );
+    const card = renderModelListCard({
+      project: { id: project.id, name: project.name },
+      thread: {
+        id: thread.threadId,
+        projectId: thread.projectId,
+        localNumber: thread.localNumber,
+        title: thread.title,
+      },
+      models,
+      selectedModel: current?.model ?? defaultModel?.model ?? null,
+      selectedReasoningEffort:
+        current?.reasoningEffort ?? defaultModel?.defaultReasoningEffort ?? null,
+      projectSpace: Boolean(database.getFeishuProjectSpaceByChat(chatId)),
+    });
+    if (replaceMessageId) {
+      await this.updateOrReplyCard(replaceMessageId, chatId, card, "模型与推理强度");
+    } else {
+      this.replyCard(chatId, card, "模型与推理强度");
+    }
   }
 
   private async setModelSettings(
@@ -1268,6 +1615,7 @@ export class Bridge {
     threadId: string,
     requestedModel: string,
     requestedEffort?: string,
+    replaceMessageId?: string,
   ): Promise<void> {
     const { database, codex } = this.dependencies;
     const conversation = database.getConversation(chatId);
@@ -1287,13 +1635,14 @@ export class Bridge {
       throw new Error("该推理强度不受当前模型支持，请重新选择。 ");
     }
     database.setThreadExecutionSettings(threadId, model.model, effort);
-    await this.showModelCard(chatId, projectId, threadId);
+    await this.showModelCard(chatId, projectId, threadId, replaceMessageId);
   }
 
   private async showThreadCard(
     chatId: string,
     projectId: string,
     requestedPage = 0,
+    replaceMessageId?: string,
   ): Promise<void> {
     const { database } = this.dependencies;
     const project = database.getProject(projectId);
@@ -1313,25 +1662,61 @@ export class Bridge {
     const page = Math.min(requestedPage, totalPages - 1);
     const offset = page * 10;
     const selectedThreadId = database.getConversation(chatId)?.threadId ?? null;
-    this.replyCard(
-      chatId,
-      renderThreadListCard({
-        project: { id: project.id, name: project.name },
-        threads: rows.slice(offset, offset + 10).map((row) => ({
-          id: row.threadId,
-          projectId: row.projectId,
-          localNumber: row.localNumber,
-          title: row.title,
-          preview: row.preview,
-          status: this.statusLabel(row.status),
-        })),
-        selectedThreadId,
-        page,
-        totalPages,
-        projectSpace: Boolean(database.getFeishuProjectSpaceByChat(chatId)),
-      }),
-      `选择 ${project.name} 的对话`,
-    );
+    const card = renderThreadListCard({
+      project: { id: project.id, name: project.name },
+      threads: rows.slice(offset, offset + 10).map((row) => ({
+        id: row.threadId,
+        projectId: row.projectId,
+        localNumber: row.localNumber,
+        title: row.title,
+        preview: row.preview,
+        status: this.statusLabel(row.status),
+      })),
+      selectedThreadId,
+      page,
+      totalPages,
+      projectSpace: Boolean(database.getFeishuProjectSpaceByChat(chatId)),
+    });
+    if (replaceMessageId) {
+      await this.updateOrReplyCard(replaceMessageId, chatId, card, `选择 ${project.name} 的对话`);
+    } else {
+      this.replyCard(chatId, card, `选择 ${project.name} 的对话`);
+    }
+  }
+
+  private conversationTurns(
+    details: CodexThreadDetails,
+  ): Array<{ userText: string; assistantText: string }> {
+    return details.turns.flatMap((turn) => {
+      const userText = turn.messages
+        .filter((message) => message.role === "user" && message.text.trim())
+        .map((message) => message.text.trim())
+        .join("\n\n");
+      const assistantMessages = turn.messages.filter(
+        (message) => message.role === "assistant" && message.text.trim(),
+      );
+      const finalAnswers = assistantMessages.filter((message) => message.phase === "final_answer");
+      const assistantText = (finalAnswers.length > 0 ? finalAnswers : assistantMessages)
+        .map((message) => message.text.trim())
+        .join("\n\n");
+      return userText || assistantText ? [{ userText, assistantText }] : [];
+    });
+  }
+
+  private renderTopicHistory(details: CodexThreadDetails): string[] {
+    return this.conversationTurns(details).flatMap((turn, index) => {
+      const content = [
+        turn.userText ? `**👤 用户**\n${turn.userText}` : "",
+        turn.assistantText ? `**🤖 Codex**\n${turn.assistantText}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const chunks = splitMessage(content, 2_750);
+      return chunks.map(
+        (chunk, chunkIndex) =>
+          `第 ${index + 1} 轮${chunks.length > 1 ? `（${chunkIndex + 1}/${chunks.length}）` : ""}\n\n${chunk}`,
+      );
+    });
   }
 
   private async runChatClose(chatId: string): Promise<void> {
@@ -1386,7 +1771,11 @@ export class Bridge {
     }
   }
 
-  private async runProjectCommand(chatId: string, command: ProjectCommand): Promise<void> {
+  private async runProjectCommand(
+    chatId: string,
+    command: ProjectCommand,
+    suppressSuccessReply = false,
+  ): Promise<void> {
     const { database } = this.dependencies;
     if (command.action === "list") {
       await this.refreshDesktopProjects();
@@ -1460,10 +1849,12 @@ export class Bridge {
       if (!project?.enabled) throw new Error("项目不存在或未启用，请先使用 /project list 查看。");
       if (command.clearThread) {
         database.bindProject(chatId, project.id);
-        this.reply(
-          chatId,
-          `已切换到 ${project.name}\n目录：${project.rootPath}\n下一条任务将创建新对话。`,
-        );
+        if (!suppressSuccessReply) {
+          this.reply(
+            chatId,
+            `已切换到 ${project.name}\n目录：${project.rootPath}\n下一条任务将创建新对话。`,
+          );
+        }
         return;
       }
       const projectRoot = await this.resolveRuntimeProjectPath(project.rootPath);
@@ -1539,12 +1930,14 @@ export class Bridge {
       const thread = state.threadId
         ? database.getProjectThread(project.id, state.threadId)
         : undefined;
-      this.reply(
-        chatId,
-        thread
-          ? `已切换到 ${this.projectLabel(project)}\n目录：${project.rootPath}\n已恢复对话 #${thread.localNumber}：${thread.title ?? thread.threadId}`
-          : `已切换到 ${this.projectLabel(project)}\n目录：${project.rootPath}\n该项目尚未选择对话。可用 /chat new 创建。`,
-      );
+      if (!suppressSuccessReply) {
+        this.reply(
+          chatId,
+          thread
+            ? `已切换到 ${this.projectLabel(project)}\n目录：${project.rootPath}\n已恢复对话 #${thread.localNumber}：${thread.title ?? thread.threadId}`
+            : `已切换到 ${this.projectLabel(project)}\n目录：${project.rootPath}\n该项目尚未选择对话。可用 /chat new 创建。`,
+        );
+      }
       return;
     }
 
@@ -1579,7 +1972,8 @@ export class Bridge {
   private async runChatCommand(
     chatId: string,
     command: Exclude<ChatCommand, { action: "close" }>,
-  ): Promise<void> {
+    options: { announce?: boolean } = {},
+  ): Promise<ThreadIndexRecord | void> {
     const { database, codex, config } = this.dependencies;
     const project = this.currentProject(chatId);
     const projectRoot = await this.resolveRuntimeProjectPath(project.rootPath);
@@ -1638,11 +2032,13 @@ export class Bridge {
           return;
         }
       }
-      this.reply(
-        chatId,
-        `✅ 已创建并选择对话 #${record.localNumber}：${record.title ?? "未命名对话"}\n请直接发送第一条任务；首次任务完成后会自动释放给 Codex Desktop。`,
-      );
-      return;
+      if (options.announce !== false) {
+        this.reply(
+          chatId,
+          `✅ 已创建并选择对话 #${record.localNumber}：${record.title ?? "未命名对话"}\n请直接发送第一条任务；首次任务完成后会自动释放给 Codex Desktop。`,
+        );
+      }
+      return record;
     }
 
     if (command.action === "list") {
@@ -1701,11 +2097,13 @@ export class Bridge {
       if (record.archived) throw new Error("该对话已归档，请先使用 /chat unarchive 恢复。");
       this.assertThreadIdle(record.threadId, summary);
       database.setThread(chatId, project.id, record.threadId);
-      this.reply(
-        chatId,
-        `已选择对话 #${record.localNumber}：${record.title ?? record.threadId}\n下一条普通消息将继续该对话。`,
-      );
-      return;
+      if (options.announce !== false) {
+        this.reply(
+          chatId,
+          `已选择对话 #${record.localNumber}：${record.title ?? record.threadId}\n下一条普通消息将继续该对话。`,
+        );
+      }
+      return record;
     }
 
     if (command.action === "rename") {
@@ -2102,6 +2500,31 @@ export class Bridge {
     void this.drainDeliveries();
   }
 
+  private async updateOrReplyCard(
+    messageId: string,
+    chatId: string,
+    card: FeishuCard,
+    fallbackText: string,
+  ): Promise<void> {
+    const update = this.dependencies.channel.updateCardMessage;
+    if (update) {
+      try {
+        await update.call(
+          this.dependencies.channel,
+          messageId,
+          card as unknown as Record<string, unknown>,
+        );
+        return;
+      } catch (error) {
+        this.dependencies.logger.warn(
+          { err: error, chatId, messageId },
+          "Could not update the existing Feishu card; sending a replacement",
+        );
+      }
+    }
+    this.replyCard(chatId, card, fallbackText);
+  }
+
   private drainDeliveries(): Promise<void> {
     if (this.deliveryWorker) return this.deliveryWorker;
     if (this.stopping) return Promise.resolve();
@@ -2389,6 +2812,10 @@ export class Bridge {
     );
   }
 
+  private errorDetail(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
   private isMissingRolloutError(error: unknown): boolean {
     const messages: string[] = [];
     let current: unknown = error;
@@ -2396,6 +2823,8 @@ export class Bridge {
       messages.push(current.message);
       current = current.cause;
     }
-    return /no rollout found for thread id/i.test(messages.join(" "));
+    return /(no rollout found for thread id|is not materialized yet|includeTurns is unavailable before first user message)/i.test(
+      messages.join(" "),
+    );
   }
 }

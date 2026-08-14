@@ -7,12 +7,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const larkMocks = vi.hoisted(() => ({
   createMessage: vi.fn(),
   replyMessage: vi.fn(),
+  patchMessage: vi.fn(),
   getMessageResource: vi.fn(),
   createChat: vi.fn(),
   getChat: vi.fn(),
   updateChat: vi.fn(),
+  deleteChat: vi.fn(),
   getChatMembers: vi.fn(),
   createChatMembers: vi.fn(),
+  deleteChatMembers: vi.fn(),
   createCard: vi.fn(),
   updateCardContent: vi.fn(),
   updateCardSettings: vi.fn(),
@@ -32,9 +35,19 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
     }
     readonly im = {
       message: { create: larkMocks.createMessage, reply: larkMocks.replyMessage },
+      v1: { message: { patch: larkMocks.patchMessage } },
       messageResource: { get: larkMocks.getMessageResource },
-      chat: { create: larkMocks.createChat, get: larkMocks.getChat, update: larkMocks.updateChat },
-      chatMembers: { get: larkMocks.getChatMembers, create: larkMocks.createChatMembers },
+      chat: {
+        create: larkMocks.createChat,
+        get: larkMocks.getChat,
+        update: larkMocks.updateChat,
+        delete: larkMocks.deleteChat,
+      },
+      chatMembers: {
+        get: larkMocks.getChatMembers,
+        create: larkMocks.createChatMembers,
+        delete: larkMocks.deleteChatMembers,
+      },
     };
     readonly cardkit = {
       v1: {
@@ -88,6 +101,7 @@ describe("Feishu adapter card contract", () => {
       code: 0,
       data: { message_id: "om-reply-1" },
     });
+    larkMocks.patchMessage.mockResolvedValue({ code: 0, data: {} });
     larkMocks.getMessageResource.mockResolvedValue({
       headers: { "content-length": "4" },
       writeFile: async (targetPath: string) => writeFile(targetPath, "test"),
@@ -105,7 +119,9 @@ describe("Feishu adapter card contract", () => {
       data: { items: [{ member_id: "ou-owner" }], has_more: false },
     });
     larkMocks.createChatMembers.mockResolvedValue({ code: 0, data: {} });
+    larkMocks.deleteChatMembers.mockResolvedValue({ code: 0, data: {} });
     larkMocks.updateChat.mockResolvedValue({ code: 0, data: {} });
+    larkMocks.deleteChat.mockResolvedValue({ code: 0, data: {} });
     larkMocks.createCard.mockResolvedValue({ code: 0, data: { card_id: "card-stream-1" } });
     larkMocks.updateCardContent.mockResolvedValue({ code: 0 });
     larkMocks.updateCardSettings.mockResolvedValue({ code: 0 });
@@ -177,17 +193,128 @@ describe("Feishu adapter card contract", () => {
         chatId: "oc-project-1",
         replyToMessageId: "om-topic-root",
         text: "approval",
-        card: { header: { title: "Approve" }, elements: [] },
+        card: {
+          header: { title: { tag: "plain_text", content: "Approve" } },
+          elements: [],
+        },
       }),
     ).resolves.toBe("om-reply-1");
+    const sentCard = JSON.parse(larkMocks.replyMessage.mock.calls[0]![0].data.content) as {
+      schema: string;
+      body: { elements: unknown[] };
+    };
     expect(larkMocks.replyMessage).toHaveBeenCalledWith({
       path: { message_id: "om-topic-root" },
       data: {
         msg_type: "interactive",
-        content: JSON.stringify({ header: { title: "Approve" }, elements: [] }),
+        content: expect.any(String),
         reply_in_thread: true,
       },
     });
+    expect(sentCard.schema).toBe("2.0");
+    expect(sentCard.body.elements).toEqual([]);
+  });
+
+  it("sends the home card as CardKit 2.0 with callback and desktop AppLink behaviors", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+    const projectSpaceUrl = "https://applink.feishu.cn/client/chat/open?openChatId=oc-project-1";
+
+    await adapter.send({
+      kind: "card",
+      audience: "p2p",
+      chatId: "oc-control",
+      text: "home",
+      card: {
+        config: { wide_screen_mode: true, enable_forward: false, update_multi: false },
+        header: {
+          template: "blue",
+          title: { tag: "plain_text", content: "ClawBridge 控制台" },
+        },
+        elements: [
+          {
+            tag: "action",
+            layout: "bisected",
+            actions: [
+              {
+                tag: "button",
+                text: { tag: "plain_text", content: "刷新" },
+                value: { version: 1, action: "menu.refresh" },
+              },
+              {
+                tag: "button",
+                text: { tag: "plain_text", content: "项目群" },
+                value: { version: 1, action: "project.space", projectId: "demo" },
+                url: projectSpaceUrl,
+                multi_url: {
+                  url: projectSpaceUrl,
+                  pc_url: projectSpaceUrl,
+                  ios_url: projectSpaceUrl,
+                  android_url: projectSpaceUrl,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    const request = larkMocks.createMessage.mock.calls[0]?.[0] as {
+      data: { content: string };
+    };
+    const card = JSON.parse(request.data.content) as {
+      schema: string;
+      body: { elements: Array<Record<string, unknown>> };
+    };
+    const serialized = JSON.stringify(card);
+
+    expect(card.schema).toBe("2.0");
+    expect(serialized).toContain('"type":"callback"');
+    expect(serialized).toContain('"action":"menu.refresh"');
+    expect(serialized).toContain('"type":"open_url"');
+    expect(serialized).toContain('"action":"project.space"');
+    expect(serialized).toContain(`"default_url":"${projectSpaceUrl}"`);
+    expect(serialized).toContain(`"pc_url":"${projectSpaceUrl}"`);
+    expect(serialized).not.toContain('"tag":"action"');
+  });
+
+  it("updates an existing interactive card without sending a new message", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+    const card = {
+      header: { title: { tag: "plain_text", content: "Thread details" } },
+      elements: [
+        {
+          tag: "action",
+          actions: [
+            {
+              tag: "button",
+              text: { tag: "plain_text", content: "Back" },
+              value: { version: 1, action: "menu.refresh" },
+            },
+          ],
+        },
+      ],
+    };
+
+    await adapter.updateCardMessage("om-card-1", card);
+
+    const patchedCard = JSON.parse(larkMocks.patchMessage.mock.calls[0]![0].data.content) as {
+      schema: string;
+      body: { elements: unknown[] };
+    };
+    expect(larkMocks.patchMessage).toHaveBeenCalledWith({
+      path: { message_id: "om-card-1" },
+      data: { content: expect.any(String) },
+    });
+    expect(patchedCard.schema).toBe("2.0");
+    expect(JSON.stringify(patchedCard)).toContain('"action":"menu.refresh"');
+    expect(larkMocks.createMessage).not.toHaveBeenCalled();
+    expect(larkMocks.replyMessage).not.toHaveBeenCalled();
   });
 
   it("rejects malformed card actions without dispatching them", async () => {
@@ -383,13 +510,11 @@ describe("Feishu adapter card contract", () => {
     expect(larkMocks.createChat).toHaveBeenCalledWith({
       params: {
         user_id_type: "open_id",
-        set_bot_manager: true,
         uuid: "project-demo-123",
       },
       data: {
         name: "[Codex] Demo Project",
         description: "ClawBridge project workspace: demo",
-        owner_id: "ou-owner",
         user_id_list: ["ou-owner"],
         group_message_type: "chat",
         chat_mode: "group",
@@ -426,7 +551,11 @@ describe("Feishu adapter card contract", () => {
 
     await expect(
       adapter.inspectProjectSpace({ chatId: "oc-project-1", ownerOpenId: "ou-owner" }),
-    ).resolves.toEqual({ status: "ready", displayName: "[Codex] Demo Project" });
+    ).resolves.toEqual({
+      status: "ready",
+      displayName: "[Codex] Demo Project",
+      canConfigure: false,
+    });
     expect(larkMocks.getChatMembers).toHaveBeenCalledWith({
       params: { member_id_type: "open_id", page_size: 100 },
       path: { chat_id: "oc-project-1" },
@@ -438,7 +567,11 @@ describe("Feishu adapter card contract", () => {
     });
     await expect(
       adapter.inspectProjectSpace({ chatId: "oc-project-1", ownerOpenId: "ou-owner" }),
-    ).resolves.toEqual({ status: "owner_absent", displayName: "[Codex] Demo Project" });
+    ).resolves.toEqual({
+      status: "owner_absent",
+      displayName: "[Codex] Demo Project",
+      canConfigure: false,
+    });
   });
 
   it("recognizes a dissolved project group without trying to list members", async () => {
@@ -470,6 +603,32 @@ describe("Feishu adapter card contract", () => {
     });
   });
 
+  it("removes the owner when leaving a project group", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(
+      adapter.removeProjectSpaceMember({ chatId: "oc-project-1", ownerOpenId: "ou-owner" }),
+    ).resolves.toBeUndefined();
+    expect(larkMocks.deleteChatMembers).toHaveBeenCalledWith({
+      params: { member_id_type: "open_id" },
+      path: { chat_id: "oc-project-1" },
+      data: { id_list: ["ou-owner"] },
+    });
+  });
+
+  it("dissolves an application-created project group", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await expect(adapter.deleteProjectSpace({ chatId: "oc-project-1" })).resolves.toBeUndefined();
+    expect(larkMocks.deleteChat).toHaveBeenCalledWith({ path: { chat_id: "oc-project-1" } });
+  });
+
   it("switches an existing project group to chat control plus threaded replies", async () => {
     const adapter = new FeishuAdapter(
       { appId: "cli-test", appSecret: "secret" },
@@ -497,6 +656,7 @@ describe("Feishu adapter card contract", () => {
         chatId: "oc-project-1",
         title: "修复移动端布局",
         idempotencyKey: "thread-019f",
+        historyMessages: ["第 1 轮\n\n👤 用户\n你好\n\n🤖 Codex\n你好！"],
       }),
     ).resolves.toEqual({ topicRootId: "om-sent-1" });
     expect(larkMocks.createMessage).toHaveBeenCalledWith({
@@ -508,13 +668,58 @@ describe("Feishu adapter card contract", () => {
         uuid: "thread-019f",
       },
     });
-    expect(larkMocks.replyMessage).toHaveBeenCalledWith({
+    expect(larkMocks.replyMessage).toHaveBeenCalledTimes(3);
+    expect(larkMocks.replyMessage).toHaveBeenNthCalledWith(1, {
       path: { message_id: "om-sent-1" },
       data: {
         msg_type: "text",
-        content: JSON.stringify({ text: "在此话题中直接发送 Codex 任务。" }),
+        content: JSON.stringify({ text: "—— 已恢复的历史对话 ——" }),
         reply_in_thread: true,
-        uuid: "thread-019f-topic",
+        uuid: expect.stringMatching(/^clawbridge-msg-[0-9a-f]{32}$/),
+      },
+    });
+    expect(larkMocks.replyMessage).toHaveBeenNthCalledWith(2, {
+      path: { message_id: "om-sent-1" },
+      data: {
+        msg_type: "interactive",
+        content: JSON.stringify({
+          type: "card",
+          data: { card_id: "card-stream-1" },
+        }),
+        reply_in_thread: true,
+        uuid: expect.stringMatching(/^clawbridge-msg-[0-9a-f]{32}$/),
+      },
+    });
+    expect(larkMocks.replyMessage).toHaveBeenNthCalledWith(3, {
+      path: { message_id: "om-sent-1" },
+      data: {
+        msg_type: "text",
+        content: JSON.stringify({ text: "—— 以下为新的对话 ——\n可直接发送新的 Codex 任务。" }),
+        reply_in_thread: true,
+        uuid: expect.stringMatching(/^clawbridge-msg-[0-9a-f]{32}$/),
+      },
+    });
+    const replyUuids = larkMocks.replyMessage.mock.calls.map(([request]) => request.data.uuid);
+    expect(new Set(replyUuids).size).toBe(3);
+    expect(larkMocks.createCard).toHaveBeenCalledWith({
+      data: {
+        type: "card_json",
+        data: JSON.stringify({
+          schema: "2.0",
+          config: { summary: { content: "第 1 轮" } },
+          header: {
+            template: "blue",
+            title: { tag: "plain_text", content: "第 1 轮" },
+          },
+          body: {
+            elements: [
+              {
+                tag: "markdown",
+                content: "👤 用户\n你好\n\n🤖 Codex\n你好！",
+              },
+            ],
+          },
+        }),
       },
     });
   });

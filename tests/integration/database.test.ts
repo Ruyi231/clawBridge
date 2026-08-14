@@ -176,6 +176,49 @@ describe("task persistence", () => {
     });
   });
 
+  it("finds the latest sent project-group control card for in-place updates", () => {
+    const card = { schema: "2.0", body: { elements: [] } };
+    const first = database.queueOutbound({
+      chatId: "chat-project",
+      kind: "card",
+      audience: "group",
+      text: "Demo 项目控制台",
+      card,
+    });
+    database.markDeliverySent(first.id, "message-project-card-1");
+    const unrelated = database.queueOutbound({
+      chatId: "chat-project",
+      kind: "card",
+      audience: "group",
+      text: "Codex 等待你的回答",
+      card,
+    });
+    database.markDeliverySent(unrelated.id, "message-question-card");
+    const latest = database.queueOutbound({
+      chatId: "chat-project",
+      kind: "card",
+      audience: "group",
+      text: "Demo 项目控制台",
+      card,
+    });
+    database.markDeliverySent(latest.id, "message-project-card-2");
+
+    expect(
+      database.getLatestSentCardMessageId({
+        chatId: "chat-project",
+        body: "Demo 项目控制台",
+        audience: "group",
+      }),
+    ).toBe("message-project-card-2");
+    expect(
+      database.getLatestSentCardMessageId({
+        chatId: "chat-other",
+        body: "Demo 项目控制台",
+        audience: "group",
+      }),
+    ).toBeUndefined();
+  });
+
   it("persists a topic reply target in text deliveries", () => {
     const queued = database.queueOutbound({
       chatId: "chat-project",
@@ -375,6 +418,43 @@ describe("project and thread persistence", () => {
           ownerOpenId: "ou_owner",
         }),
       ).toThrow(/already bound/);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("promotes a pending Feishu topic after its first Codex turn starts", () => {
+    const database = new BridgeDatabase(":memory:");
+    try {
+      database.syncProjects([{ id: "demo", name: "Demo", rootPath: "D:/demo", enabled: true }]);
+      database.bindFeishuProjectSpace({
+        projectId: "demo",
+        chatId: "oc_demo",
+        ownerOpenId: "ou_owner",
+        displayName: "[Codex] Demo",
+      });
+      expect(
+        database.bindFeishuPendingTopic({
+          projectId: "demo",
+          chatId: "oc_demo",
+          topicRootId: "omt_new",
+          ownerOpenId: "ou_owner",
+        }),
+      ).toMatchObject({ projectId: "demo", topicRootId: "omt_new" });
+
+      database.upsertThread({ threadId: "thread-first", projectId: "demo" });
+      const route = database.promoteFeishuPendingTopic({
+        projectId: "demo",
+        chatId: "oc_demo",
+        topicRootId: "omt_new",
+        threadId: "thread-first",
+      });
+
+      expect(route).toMatchObject({ threadId: "thread-first", topicRootId: "omt_new" });
+      expect(database.resolveFeishuPendingTopic("oc_demo", "omt_new")).toBeUndefined();
+      expect(database.resolveFeishuThreadRoute("oc_demo", "omt_new")?.threadId).toBe(
+        "thread-first",
+      );
     } finally {
       database.close();
     }

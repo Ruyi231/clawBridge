@@ -1,8 +1,157 @@
 import * as lark from "@larksuiteoapi/node-sdk";
+import { createHash } from "node:crypto";
 import type { Logger } from "pino";
 import type { ChannelAdapter } from "./channel-adapter.js";
 import { parseFeishuCardAction, parseFeishuMessage } from "./feishu-event.js";
 import type { InboundEvent, OutboundMessage } from "../core/types.js";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function convertCardButton(
+  input: Record<string, unknown>,
+  elementId: string,
+): Record<string, unknown> {
+  const text = isRecord(input.text) ? input.text : { tag: "plain_text", content: "操作" };
+  const classicType = typeof input.type === "string" ? input.type : "default";
+  const type =
+    classicType === "primary"
+      ? "primary_filled"
+      : classicType === "danger"
+        ? "danger_filled"
+        : "default";
+  const multiUrl = isRecord(input.multi_url) ? input.multi_url : undefined;
+  const defaultUrl =
+    typeof input.url === "string"
+      ? input.url
+      : typeof multiUrl?.url === "string"
+        ? multiUrl.url
+        : undefined;
+  const behaviors: Array<Record<string, unknown>> = [];
+  if (isRecord(input.value)) {
+    behaviors.push({ type: "callback", value: input.value });
+  }
+  if (defaultUrl) {
+    behaviors.push({
+      type: "open_url",
+      default_url: defaultUrl,
+      pc_url: typeof multiUrl?.pc_url === "string" ? multiUrl.pc_url : defaultUrl,
+      ios_url: typeof multiUrl?.ios_url === "string" ? multiUrl.ios_url : defaultUrl,
+      android_url: typeof multiUrl?.android_url === "string" ? multiUrl.android_url : defaultUrl,
+    });
+  }
+
+  return {
+    tag: "button",
+    element_id: elementId,
+    text,
+    type,
+    width: "fill",
+    size: "medium",
+    behaviors,
+    ...(typeof input.name === "string" ? { name: input.name } : {}),
+    ...(input.action_type === "form_submit" ? { form_action_type: "submit" } : {}),
+    ...(isRecord(input.confirm) ? { confirm: input.confirm } : {}),
+  };
+}
+
+interface CardConversionState {
+  rowIndex: number;
+  buttonIndex: number;
+  inputIndex: number;
+}
+
+function convertCardElements(
+  elements: unknown[],
+  state: CardConversionState,
+): Array<Record<string, unknown>> {
+  const converted: Array<Record<string, unknown>> = [];
+  for (const rawElement of elements) {
+    if (!isRecord(rawElement)) continue;
+    if (rawElement.tag === "hr") {
+      converted.push({ tag: "hr" });
+      continue;
+    }
+    if (rawElement.tag === "div" && isRecord(rawElement.text)) {
+      converted.push({
+        tag: "markdown",
+        content: typeof rawElement.text.content === "string" ? rawElement.text.content : "",
+      });
+      if (isRecord(rawElement.extra)) {
+        converted.push(convertCardButton(rawElement.extra, `card_btn_${++state.buttonIndex}`));
+      }
+      continue;
+    }
+    if (rawElement.tag === "button") {
+      converted.push(convertCardButton(rawElement, `card_btn_${++state.buttonIndex}`));
+      continue;
+    }
+    if (rawElement.tag === "input") {
+      converted.push({
+        ...rawElement,
+        element_id: `card_input_${++state.inputIndex}`,
+      });
+      continue;
+    }
+    if (rawElement.tag === "form" && Array.isArray(rawElement.elements)) {
+      converted.push({
+        tag: "form",
+        ...(typeof rawElement.name === "string" ? { name: rawElement.name } : {}),
+        elements: convertCardElements(rawElement.elements, state),
+      });
+      continue;
+    }
+    if (rawElement.tag !== "action" || !Array.isArray(rawElement.actions)) continue;
+
+    const buttons = rawElement.actions
+      .filter(isRecord)
+      .map((action) => convertCardButton(action, `card_btn_${++state.buttonIndex}`));
+    if (buttons.length === 0) continue;
+    if (buttons.length === 1) {
+      converted.push(buttons[0]!);
+      continue;
+    }
+    converted.push({
+      tag: "column_set",
+      element_id: `card_row_${++state.rowIndex}`,
+      flex_mode: buttons.length === 2 ? "bisect" : buttons.length === 3 ? "trisection" : "flow",
+      horizontal_spacing: "8px",
+      columns: buttons.map((button) => ({
+        tag: "column",
+        width: "weighted",
+        weight: 1,
+        vertical_align: "top",
+        elements: [button],
+      })),
+    });
+  }
+  return converted;
+}
+
+function convertCardToCardKit(card: Record<string, unknown>): Record<string, unknown> {
+  if (card.schema === "2.0" || !Array.isArray(card.elements)) return card;
+
+  const header = isRecord(card.header) ? card.header : undefined;
+  const headerTitle = header && isRecord(header.title) ? header.title : undefined;
+  const summary = typeof headerTitle?.content === "string" ? headerTitle.content : "ClawBridge";
+  const state: CardConversionState = { rowIndex: 0, buttonIndex: 0, inputIndex: 0 };
+  const bodyElements = convertCardElements(card.elements, state);
+
+  return {
+    schema: "2.0",
+    config: {
+      update_multi: true,
+      summary: { content: summary },
+    },
+    ...(header ? { header } : {}),
+    body: {
+      direction: "vertical",
+      padding: "12px 12px 12px 12px",
+      elements: bodyElements,
+    },
+  };
+}
 
 export class FeishuAdapter implements ChannelAdapter {
   private readonly client: lark.Client;
@@ -87,6 +236,41 @@ export class FeishuAdapter implements ChannelAdapter {
     this.logger[level]({ source: "feishu-sdk" }, summary || "Feishu SDK event");
   }
 
+  private async callApi<T>(operation: string, call: () => Promise<T>): Promise<T> {
+    try {
+      return await call();
+    } catch (error) {
+      const responseData =
+        typeof error === "object" && error !== null && "response" in error
+          ? (error as { response?: { data?: unknown } }).response?.data
+          : undefined;
+      const apiCode =
+        typeof responseData === "object" && responseData !== null && "code" in responseData
+          ? String((responseData as { code?: unknown }).code)
+          : undefined;
+      const apiMessage =
+        typeof responseData === "object" && responseData !== null && "msg" in responseData
+          ? String((responseData as { msg?: unknown }).msg)
+          : undefined;
+      const detail = [
+        apiCode ? `飞书错误码 ${apiCode}` : undefined,
+        apiMessage,
+        !apiCode && !apiMessage
+          ? error instanceof Error
+            ? error.message
+            : String(error)
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join("：");
+      throw new Error(`${operation}失败：${detail}`);
+    }
+  }
+
+  private async wait(milliseconds: number): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+  }
+
   async start(onEvent: (event: InboundEvent) => Promise<void>): Promise<void> {
     const dispatcher = new lark.EventDispatcher({}).register({
       "im.message.receive_v1": async (payload: unknown) => {
@@ -160,7 +344,9 @@ export class FeishuAdapter implements ChannelAdapter {
 
   async send(message: OutboundMessage): Promise<string> {
     const isCard = message.kind === "card";
-    const content = JSON.stringify(isCard ? message.card : { text: message.text });
+    const content = JSON.stringify(
+      isCard ? convertCardToCardKit(message.card) : { text: message.text },
+    );
     const response = message.replyToMessageId
       ? await this.client.im.message.reply({
           path: { message_id: message.replyToMessageId },
@@ -179,6 +365,19 @@ export class FeishuAdapter implements ChannelAdapter {
     const messageId = response.data?.message_id;
     if (!messageId) throw new Error("Feishu send failed: response is missing message_id");
     return messageId;
+  }
+
+  async updateCardMessage(messageId: string, card: Record<string, unknown>): Promise<void> {
+    const preparedCard = convertCardToCardKit(card);
+    const response = await this.callApi("更新飞书卡片", () =>
+      this.client.im.v1.message.patch({
+        path: { message_id: messageId },
+        data: { content: JSON.stringify(preparedCard) },
+      }),
+    );
+    if (response.code !== 0) {
+      throw new Error(`Feishu card update failed: ${response.msg ?? response.code}`);
+    }
   }
 
   async downloadAttachment(input: {
@@ -217,25 +416,25 @@ export class FeishuAdapter implements ChannelAdapter {
       .slice(0, 48);
     if (!safeName) throw new Error("Feishu project space name cannot be empty");
     const displayName = `[Codex] ${safeName}`.slice(0, 60);
-    const response = await this.client.im.chat.create({
-      params: {
-        user_id_type: "open_id",
-        set_bot_manager: true,
-        uuid: input.idempotencyKey.slice(0, 50),
-      },
-      data: {
-        name: displayName,
-        description: `ClawBridge project workspace: ${input.projectId}`.slice(0, 100),
-        owner_id: input.ownerOpenId,
-        user_id_list: [input.ownerOpenId],
-        group_message_type: "chat",
-        chat_mode: "group",
-        chat_type: "private",
-        join_message_visibility: "not_anyone",
-        leave_message_visibility: "not_anyone",
-        membership_approval: "approval_required",
-      },
-    });
+    const response = await this.callApi("创建飞书项目群", () =>
+      this.client.im.chat.create({
+        params: {
+          user_id_type: "open_id",
+          uuid: input.idempotencyKey.slice(0, 50),
+        },
+        data: {
+          name: displayName,
+          description: `ClawBridge project workspace: ${input.projectId}`.slice(0, 100),
+          user_id_list: [input.ownerOpenId],
+          group_message_type: "chat",
+          chat_mode: "group",
+          chat_type: "private",
+          join_message_visibility: "not_anyone",
+          leave_message_visibility: "not_anyone",
+          membership_approval: "approval_required",
+        },
+      }),
+    );
     if (response.code !== 0) {
       throw new Error(`Feishu create project space failed: ${response.msg ?? response.code}`);
     }
@@ -250,11 +449,14 @@ export class FeishuAdapter implements ChannelAdapter {
     status: "ready" | "owner_absent" | "dissolved" | "missing";
     displayName?: string;
     messageMode?: "chat" | "thread";
+    canConfigure?: boolean;
   }> {
-    const chat = await this.client.im.chat.get({
-      params: { user_id_type: "open_id" },
-      path: { chat_id: input.chatId },
-    });
+    const chat = await this.callApi("读取飞书项目群信息", () =>
+      this.client.im.chat.get({
+        params: { user_id_type: "open_id" },
+        path: { chat_id: input.chatId },
+      }),
+    );
     if (chat.code === 232006) return { status: "missing" };
     if (chat.code === 232009 || chat.data?.chat_status?.startsWith("dissolved")) {
       return { status: "dissolved" };
@@ -265,14 +467,16 @@ export class FeishuAdapter implements ChannelAdapter {
 
     let pageToken: string | undefined;
     do {
-      const members = await this.client.im.chatMembers.get({
-        params: {
-          member_id_type: "open_id",
-          page_size: 100,
-          ...(pageToken ? { page_token: pageToken } : {}),
-        },
-        path: { chat_id: input.chatId },
-      });
+      const members = await this.callApi("读取飞书项目群成员", () =>
+        this.client.im.chatMembers.get({
+          params: {
+            member_id_type: "open_id",
+            page_size: 100,
+            ...(pageToken ? { page_token: pageToken } : {}),
+          },
+          path: { chat_id: input.chatId },
+        }),
+      );
       if (members.code === 232006) return { status: "missing" };
       if (members.code === 232009) return { status: "dissolved" };
       if (members.code !== 0) {
@@ -287,6 +491,7 @@ export class FeishuAdapter implements ChannelAdapter {
           ...(chat.data?.group_message_type === "chat" || chat.data?.group_message_type === "thread"
             ? { messageMode: chat.data.group_message_type }
             : {}),
+          canConfigure: Boolean(chat.data?.bot_manager_id_list?.length),
         };
       }
       pageToken = members.data?.has_more ? members.data.page_token : undefined;
@@ -298,15 +503,18 @@ export class FeishuAdapter implements ChannelAdapter {
       ...(chat.data?.group_message_type === "chat" || chat.data?.group_message_type === "thread"
         ? { messageMode: chat.data.group_message_type }
         : {}),
+      canConfigure: Boolean(chat.data?.bot_manager_id_list?.length),
     };
   }
 
   async addProjectSpaceMember(input: { chatId: string; ownerOpenId: string }): Promise<void> {
-    const response = await this.client.im.chatMembers.create({
-      params: { member_id_type: "open_id", succeed_type: 2 },
-      path: { chat_id: input.chatId },
-      data: { id_list: [input.ownerOpenId] },
-    });
+    const response = await this.callApi("重新加入飞书项目群", () =>
+      this.client.im.chatMembers.create({
+        params: { member_id_type: "open_id", succeed_type: 2 },
+        path: { chat_id: input.chatId },
+        data: { id_list: [input.ownerOpenId] },
+      }),
+    );
     if (response.code !== 0) {
       throw new Error(`Feishu rejoin project group failed: ${response.msg ?? response.code}`);
     }
@@ -320,12 +528,39 @@ export class FeishuAdapter implements ChannelAdapter {
     }
   }
 
+  async removeProjectSpaceMember(input: { chatId: string; ownerOpenId: string }): Promise<void> {
+    const response = await this.callApi("退出飞书项目群", () =>
+      this.client.im.chatMembers.delete({
+        params: { member_id_type: "open_id" },
+        path: { chat_id: input.chatId },
+        data: { id_list: [input.ownerOpenId] },
+      }),
+    );
+    if (response.code !== 0) {
+      throw new Error(`Feishu leave project group failed: ${response.msg ?? response.code}`);
+    }
+    if (response.data?.invalid_id_list?.includes(input.ownerOpenId)) {
+      throw new Error("Feishu leave project group failed: the owner was not removed");
+    }
+  }
+
+  async deleteProjectSpace(input: { chatId: string }): Promise<void> {
+    const response = await this.callApi("解散飞书项目群", () =>
+      this.client.im.chat.delete({ path: { chat_id: input.chatId } }),
+    );
+    if (response.code !== 0) {
+      throw new Error(`Feishu dissolve project group failed: ${response.msg ?? response.code}`);
+    }
+  }
+
   async configureProjectSpace(input: { chatId: string }): Promise<void> {
-    const response = await this.client.im.chat.update({
-      params: { user_id_type: "open_id" },
-      path: { chat_id: input.chatId },
-      data: { group_message_type: "chat" },
-    });
+    const response = await this.callApi("配置飞书项目群", () =>
+      this.client.im.chat.update({
+        params: { user_id_type: "open_id" },
+        path: { chat_id: input.chatId },
+        data: { group_message_type: "chat" },
+      }),
+    );
     if (response.code !== 0) {
       throw new Error(`Feishu configure project group failed: ${response.msg ?? response.code}`);
     }
@@ -335,21 +570,24 @@ export class FeishuAdapter implements ChannelAdapter {
     chatId: string;
     title: string;
     idempotencyKey: string;
+    historyMessages?: string[];
   }): Promise<{ topicRootId: string }> {
     const title = input.title
       .replace(/[\r\n\t]/g, " ")
       .trim()
       .slice(0, 120);
     if (!title) throw new Error("Feishu project topic title cannot be empty");
-    const root = await this.client.im.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: {
-        receive_id: input.chatId,
-        msg_type: "text",
-        content: JSON.stringify({ text: `🧵 ${title}` }),
-        uuid: input.idempotencyKey.slice(0, 50),
-      },
-    });
+    const root = await this.callApi("创建项目话题根消息", () =>
+      this.client.im.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: {
+          receive_id: input.chatId,
+          msg_type: "text",
+          content: JSON.stringify({ text: `🧵 ${title}` }),
+          uuid: input.idempotencyKey.slice(0, 50),
+        },
+      }),
+    );
     if (root.code !== 0) {
       throw new Error(`Feishu create project topic failed: ${root.msg ?? root.code}`);
     }
@@ -357,20 +595,90 @@ export class FeishuAdapter implements ChannelAdapter {
     if (!rootMessageId) {
       throw new Error("Feishu create project topic failed: response is missing message_id");
     }
-    const response = await this.client.im.message.reply({
-      path: { message_id: rootMessageId },
-      data: {
-        msg_type: "text",
-        content: JSON.stringify({ text: "在此话题中直接发送 Codex 任务。" }),
-        reply_in_thread: true,
-        uuid: `${input.idempotencyKey}-topic`.slice(0, 50),
-      },
-    });
-    if (response.code !== 0) {
-      throw new Error(`Feishu create project topic failed: ${response.msg ?? response.code}`);
+    const historyMessages = (input.historyMessages ?? []).filter((message) => message.trim());
+    const replies: Array<{ kind: "text" | "history"; text: string }> = historyMessages.length
+      ? [
+          { kind: "text", text: "—— 已恢复的历史对话 ——" },
+          ...historyMessages.map((text) => ({ kind: "history" as const, text })),
+          {
+            kind: "text",
+            text: "—— 以下为新的对话 ——\n可直接发送新的 Codex 任务。",
+          },
+        ]
+      : [{ kind: "text", text: "—— 新的对话 ——\n可直接发送 Codex 任务。" }];
+    let topicRootId = rootMessageId;
+    for (const [index, reply] of replies.entries()) {
+      const historyCardId =
+        reply.kind === "history" ? await this.createHistoryCard(reply.text) : undefined;
+      let response: Awaited<ReturnType<typeof this.client.im.message.reply>> | undefined;
+      let lastError: unknown;
+      for (const delayMilliseconds of [0, 400, 1_000]) {
+        if (delayMilliseconds > 0) await this.wait(delayMilliseconds);
+        try {
+          response = await this.callApi("创建项目话题回复", () =>
+            this.client.im.message.reply({
+              path: { message_id: rootMessageId },
+              data:
+                reply.kind === "history"
+                  ? {
+                      msg_type: "interactive" as const,
+                      content: JSON.stringify({
+                        type: "card",
+                        data: { card_id: historyCardId },
+                      }),
+                      reply_in_thread: true,
+                      uuid: `clawbridge-msg-${createHash("sha256")
+                        .update(`${input.idempotencyKey}\0${index}`)
+                        .digest("hex")
+                        .slice(0, 32)}`,
+                    }
+                  : {
+                      msg_type: "text" as const,
+                      content: JSON.stringify({ text: reply.text }),
+                      reply_in_thread: true,
+                      uuid: `clawbridge-msg-${createHash("sha256")
+                        .update(`${input.idempotencyKey}\0${index}`)
+                        .digest("hex")
+                        .slice(0, 32)}`,
+                    },
+            }),
+          );
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (!response) throw lastError;
+      if (response.code !== 0) {
+        throw new Error(`Feishu create project topic failed: ${response.msg ?? response.code}`);
+      }
+      topicRootId = response.data?.root_id ?? topicRootId;
+      if (index + 1 < replies.length) await this.wait(25);
     }
-    const topicRootId = response.data?.root_id ?? rootMessageId;
     return { topicRootId };
+  }
+
+  private async createHistoryCard(message: string): Promise<string> {
+    const [firstLine = "历史对话", ...remainingLines] = message.split("\n");
+    const title = firstLine.trim().slice(0, 80) || "历史对话";
+    const content = remainingLines.join("\n").trim() || message.trim();
+    const card = {
+      schema: "2.0",
+      config: { summary: { content: title } },
+      header: {
+        template: "blue",
+        title: { tag: "plain_text", content: title },
+      },
+      body: { elements: [{ tag: "markdown", content }] },
+    };
+    const created = await this.client.cardkit.v1.card.create({
+      data: { type: "card_json", data: JSON.stringify(card) },
+    });
+    const cardId = created.data?.card_id;
+    if (created.code !== 0 || !cardId) {
+      throw new Error(`Feishu history card create failed: ${created.msg ?? created.code}`);
+    }
+    return cardId;
   }
 
   async startTaskStream(input: {

@@ -67,6 +67,20 @@ const actionSchemas = [
   z
     .object({
       version: z.literal(CARD_VERSION),
+      action: z.literal("project.leave"),
+      projectId: projectIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
+      action: z.literal("project.dissolve"),
+      projectId: projectIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
       action: z.literal("thread.list"),
       projectId: projectIdSchema,
       page: cardPageSchema.optional(),
@@ -93,6 +107,7 @@ const actionSchemas = [
       action: z.literal("thread.show"),
       projectId: projectIdSchema,
       threadId: threadIdSchema,
+      page: cardPageSchema.optional(),
     })
     .strict(),
   z.object({ version: z.literal(CARD_VERSION), action: z.literal("task.stop") }).strict(),
@@ -181,6 +196,7 @@ export interface HomeCardInput {
   thread: CardThread | null;
   taskState?: string | null;
   notice?: string | null;
+  projectSpaceUrl?: string | null;
 }
 
 export interface ProjectSpaceCardInput {
@@ -273,12 +289,43 @@ function button(
   label: string,
   value: CardAction,
   type: "default" | "primary" | "danger" = "default",
+  confirm?: { title: string; text: string },
 ): Record<string, unknown> {
   return {
     tag: "button",
     text: { tag: "plain_text", content: label },
     type,
     value,
+    ...(confirm
+      ? {
+          confirm: {
+            title: { tag: "plain_text", content: confirm.title },
+            text: { tag: "plain_text", content: confirm.text },
+          },
+        }
+      : {}),
+  };
+}
+
+function linkButton(
+  label: string,
+  url: string,
+  value?: CardAction,
+  type: "default" | "primary" | "danger" = "default",
+): Record<string, unknown> {
+  const multiUrl = {
+    url,
+    pc_url: url,
+    android_url: url,
+    ios_url: url,
+  };
+  return {
+    tag: "button",
+    text: { tag: "plain_text", content: label },
+    type,
+    ...(value ? { value } : {}),
+    url,
+    multi_url: multiUrl,
   };
 }
 
@@ -361,21 +408,24 @@ function threadAction(
   actionName: "thread.use" | "thread.show",
   projectId: string,
   threadId: string,
+  page?: number,
 ): CardAction {
   return parseCardAction(
-    action({ version: CARD_VERSION, action: actionName, projectId, threadId }),
+    action({
+      version: CARD_VERSION,
+      action: actionName,
+      projectId,
+      threadId,
+      ...(actionName === "thread.show" && page !== undefined ? { page } : {}),
+    }),
   );
 }
 
 export function renderHomeCard(input: HomeCardInput): FeishuCard {
   const projectName = input.project ? displayText(input.project.name, 60) : "未选择";
-  const threadName = input.thread
-    ? `#${input.thread.localNumber} ${displayText(input.thread.title || "未命名对话", 56)}`
-    : "未选择";
-  const taskState = displayText(input.taskState?.trim() || "空闲", 40);
   const elements: Array<Record<string, unknown>> = [
     markdown(
-      `**当前项目：** ${projectName}\n**当前对话：** ${threadName}\n**任务状态：** ${taskState}`,
+      `**当前项目：** ${projectName}\n\n本控制台只负责选择项目和进入项目群；对话与任务请在对应项目群中管理。`,
     ),
   ];
 
@@ -383,63 +433,24 @@ export function renderHomeCard(input: HomeCardInput): FeishuCard {
     elements.push(markdown(`💡 ${displayText(input.notice, 160)}`));
   }
 
-  const projectActions: Array<Record<string, unknown>> = [
-    button("选择项目", action({ version: CARD_VERSION, action: "project.list" }), "primary"),
-  ];
-  if (input.project) {
-    projectActions.push(button("选择对话", projectScopedAction("thread.list", input.project.id)));
-  } else {
-    projectActions.push(button("刷新", action({ version: CARD_VERSION, action: "menu.refresh" })));
-  }
-
-  elements.push(divider(), actionRow(projectActions));
+  elements.push(
+    divider(),
+    actionRow([
+      button("选择项目", action({ version: CARD_VERSION, action: "project.list" }), "primary"),
+      button("刷新", action({ version: CARD_VERSION, action: "menu.refresh" })),
+    ]),
+  );
   if (input.project) {
     elements.push(
       actionRow([
-        button(
-          "项目群",
-          action({ version: CARD_VERSION, action: "project.space", projectId: input.project.id }),
-        ),
-        button("新对话", projectScopedAction("thread.new", input.project.id)),
+        input.projectSpaceUrl
+          ? linkButton("项目群", input.projectSpaceUrl, undefined, "primary")
+          : button("项目群", projectScopedAction("project.space", input.project.id)),
       ]),
-      actionRow([
-        button("全部任务", action({ version: CARD_VERSION, action: "task.list" })),
-        button(
-          "项目任务",
-          action({ version: CARD_VERSION, action: "task.list", projectId: input.project.id }),
-        ),
-      ]),
-      ...(input.thread
-        ? [
-            actionRow([
-              button(
-                "模型设置",
-                action({
-                  version: CARD_VERSION,
-                  action: "model.list",
-                  projectId: input.project.id,
-                  threadId: input.thread.id,
-                }),
-              ),
-            ]),
-          ]
-        : []),
-      actionRow([
-        button("刷新", action({ version: CARD_VERSION, action: "menu.refresh" })),
-        button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" })),
-      ]),
-    );
-    elements.push(
-      actionRow([
-        button("停止任务", action({ version: CARD_VERSION, action: "task.stop" }), "danger"),
-      ]),
+      actionRow([button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" }))]),
     );
   } else {
     elements.push(
-      actionRow([
-        button("全部任务", action({ version: CARD_VERSION, action: "task.list" })),
-        button("停止任务", action({ version: CARD_VERSION, action: "task.stop" }), "danger"),
-      ]),
       actionRow([button("交还桌面", action({ version: CARD_VERSION, action: "chat.close" }))]),
     );
   }
@@ -480,6 +491,21 @@ export function renderProjectSpaceCard(input: ProjectSpaceCardInput): FeishuCard
             ),
           ]
         : []),
+    ]),
+    actionRow([
+      button(
+        "退出并丢弃项目群",
+        action({
+          version: CARD_VERSION,
+          action: "project.dissolve",
+          projectId: input.project.id,
+        }),
+        "danger",
+        {
+          title: "确认退出并丢弃项目群？",
+          text: "当前群聊和群内消息将被删除；下次进入会新建空群。Codex 本地项目与对话历史会保留。",
+        },
+      ),
     ]),
   );
   return card(`${displayText(input.project.name, 50)} · 项目控制台`, elements);
@@ -760,7 +786,6 @@ export function renderThreadListCard(input: ThreadListCardInput): FeishuCard {
             threadAction("thread.use", input.project.id, thread.id),
             selected ? "primary" : "default",
           ),
-          button("查看内容", threadAction("thread.show", input.project.id, thread.id)),
         ]),
       );
     }

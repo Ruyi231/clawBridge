@@ -15,6 +15,8 @@ import type { DesktopProjectSource } from "../../src/projects/codex-desktop-proj
 class FakeChannel implements ChannelAdapter {
   callback?: (event: InboundEvent) => Promise<void>;
   readonly sent: OutboundMessage[] = [];
+  readonly updatedCards: Array<{ messageId: string; card: Record<string, unknown> }> = [];
+  updateCardMessage?: NonNullable<ChannelAdapter["updateCardMessage"]>;
   sendAttempts = 0;
   private remainingFailures: number;
   private releaseBlockedSend?: () => void;
@@ -26,21 +28,42 @@ class FakeChannel implements ChannelAdapter {
     async () => ({ status: "ready", displayName: "[Codex] Demo" }),
   );
   readonly addProjectSpaceMember = vi.fn(async () => undefined);
+  readonly removeProjectSpaceMember = vi.fn(async () => undefined);
+  readonly deleteProjectSpace = vi.fn(async () => undefined);
   readonly configureProjectSpace = vi.fn(async () => undefined);
-  readonly createProjectTopic = vi.fn(async () => ({ topicRootId: "topic-created-thread" }));
-  readonly startTaskStream = vi.fn(async () => ({
-    streamId: "stream-task-1",
-    messageId: "message-stream-1",
-  }));
-  readonly updateTaskStream = vi.fn(async () => undefined);
-  readonly finishTaskStream = vi.fn(async () => undefined);
+  readonly createProjectTopic = vi.fn<NonNullable<ChannelAdapter["createProjectTopic"]>>(
+    async () => ({ topicRootId: "topic-created-thread" }),
+  );
+  startTaskStream?: NonNullable<ChannelAdapter["startTaskStream"]>;
+  updateTaskStream?: NonNullable<ChannelAdapter["updateTaskStream"]>;
+  finishTaskStream?: NonNullable<ChannelAdapter["finishTaskStream"]>;
   readonly downloadAttachment = vi.fn(async (input: { targetPath: string }) => {
     const { writeFile } = await import("node:fs/promises");
     await writeFile(input.targetPath, "attachment content");
   });
 
-  constructor(options: { failures?: number; blockFirstSend?: boolean } = {}) {
+  constructor(
+    options: {
+      failures?: number;
+      blockFirstSend?: boolean;
+      updateCards?: boolean;
+      streaming?: boolean;
+    } = {},
+  ) {
     this.remainingFailures = options.failures ?? 0;
+    if (options.updateCards) {
+      this.updateCardMessage = vi.fn(async (messageId, card) => {
+        this.updatedCards.push({ messageId, card });
+      });
+    }
+    if (options.streaming) {
+      this.startTaskStream = vi.fn(async () => ({
+        streamId: "stream-task-1",
+        messageId: "message-stream-1",
+      }));
+      this.updateTaskStream = vi.fn(async () => undefined);
+      this.finishTaskStream = vi.fn(async () => undefined);
+    }
     if (options.blockFirstSend) {
       this.firstSendGate = new Promise<void>((resolve) => {
         this.releaseBlockedSend = resolve;
@@ -505,6 +528,52 @@ describe("Bridge vertical slice", () => {
     expect(channel.sent.at(-1)?.text).toContain("thread-bridge");
   });
 
+  it("keeps only the finalized stream card when streaming succeeds", async () => {
+    const channel = new FakeChannel({ streaming: true });
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receive("stream this result", "stream-success");
+    await vi.waitFor(() => expect(database.listTasks({ limit: 1 })[0]?.state).toBe("completed"));
+
+    expect(channel.updateTaskStream).toHaveBeenLastCalledWith("stream-task-1", "done");
+    expect(channel.finishTaskStream).toHaveBeenCalledWith("stream-task-1", "Demo · 已完成");
+    expect(channel.sent.some((message) => message.text.includes("✅ completed"))).toBe(false);
+  });
+
+  it("falls back to a normal final reply when finalizing the stream fails", async () => {
+    const channel = new FakeChannel({ streaming: true });
+    channel.updateTaskStream = vi.fn(async () => {
+      throw new Error("CardKit update failed");
+    });
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receive("stream fallback", "stream-fallback");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.text.includes("✅ completed"))).toBe(true),
+    );
+    expect(database.listTasks({ limit: 1 })[0]?.state).toBe("completed");
+  });
+
   it("routes a registered project topic to its bound Codex thread", async () => {
     const channel = new FakeChannel();
     const codex = fakeCodex();
@@ -798,7 +867,7 @@ describe("Bridge vertical slice", () => {
     }
   });
 
-  it("selects a project, creates a fresh thread, and opens its project topic", async () => {
+  it("creates a fresh project topic and materializes its Codex thread on the first task", async () => {
     const channel = new FakeChannel();
     const codex = fakeCodex();
     const database = new BridgeDatabase(":memory:");
@@ -842,7 +911,9 @@ describe("Bridge vertical slice", () => {
       "card-thread-new",
     );
     await vi.waitFor(() =>
-      expect(database.getConversation("chat-owner")?.threadId).toBe("thread-created-1"),
+      expect(
+        database.resolveFeishuPendingTopic("chat-created-project", "topic-created-thread"),
+      ).toMatchObject({ projectId: "demo" }),
     );
     expect(channel.createProjectSpace).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: "demo", projectName: "Demo", ownerOpenId: "owner" }),
@@ -850,21 +921,28 @@ describe("Bridge vertical slice", () => {
     expect(channel.createProjectTopic).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: "chat-created-project" }),
     );
-    expect(database.getFeishuThreadRoute("thread-created-1")).toMatchObject({
-      projectId: "demo",
+    expect(database.getFeishuThreadRoute("thread-created-1")).toBeUndefined();
+    expect(codex.runTurn).not.toHaveBeenCalled();
+
+    await channel.receiveGroup("从新对话开始执行", "card-fresh-thread-task", {
       chatId: "chat-created-project",
       topicRootId: "topic-created-thread",
     });
-
-    await channel.receive("从新对话开始执行", "card-fresh-thread-task");
     await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(1));
     expect(vi.mocked(codex.runTurn).mock.calls[0]?.[0]).toMatchObject({
       prompt: "从新对话开始执行",
-      threadId: "thread-created-1",
+      threadId: null,
     });
     await vi.waitFor(() =>
-      expect(database.getConversation("chat-owner")?.threadId).toBe("thread-bridge"),
+      expect(database.getFeishuThreadRoute("thread-bridge")).toMatchObject({
+        projectId: "demo",
+        chatId: "chat-created-project",
+        topicRootId: "topic-created-thread",
+      }),
     );
+    expect(
+      database.resolveFeishuPendingTopic("chat-created-project", "topic-created-thread"),
+    ).toBeUndefined();
   });
 
   it("reinvites the owner when an existing project group was temporarily left", async () => {
@@ -910,9 +988,191 @@ describe("Bridge vertical slice", () => {
     expect(database.getFeishuProjectSpace("demo")?.chatId).toBe("chat-existing-project");
   });
 
+  it("rebuilds the project group when Feishu rejects rejoining the previous group", async () => {
+    const channel = new FakeChannel();
+    channel.inspectProjectSpace.mockResolvedValueOnce({
+      status: "owner_absent",
+      displayName: "[Codex] Demo",
+    });
+    channel.addProjectSpaceMember.mockRejectedValueOnce(
+      new Error("Request failed with status code 400"),
+    );
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-existing-project",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/menu", "rejoin-fallback-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "rejoin-fallback-project-space",
+    );
+    await vi.waitFor(() =>
+      expect(database.getFeishuProjectSpace("demo")?.chatId).toBe("chat-created-project"),
+    );
+    expect(channel.createProjectSpace).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "demo", ownerOpenId: "owner" }),
+    );
+    expect(
+      channel.sent.some((message) => message.text.includes("Request failed with status code 400")),
+    ).toBe(false);
+  });
+
+  it("rebuilds the project group when the previous group can no longer be inspected", async () => {
+    const channel = new FakeChannel();
+    channel.inspectProjectSpace.mockRejectedValueOnce(
+      new Error("读取飞书项目群信息失败：Request failed with status code 400"),
+    );
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-inaccessible-project",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/menu", "inspect-fallback-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "inspect-fallback-project-space",
+    );
+    await vi.waitFor(() =>
+      expect(database.getFeishuProjectSpace("demo")?.chatId).toBe("chat-created-project"),
+    );
+    expect(channel.createProjectSpace).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "demo", ownerOpenId: "owner" }),
+    );
+    expect(
+      channel.sent.some((message) => message.text.includes("Request failed with status code 400")),
+    ).toBe(false);
+  });
+
+  it("opens the project group and reports a topic-specific notice when topic creation fails", async () => {
+    const channel = new FakeChannel({ updateCards: true });
+    channel.createProjectTopic.mockRejectedValueOnce(
+      new Error("创建项目话题回复失败：飞书错误码 230071：reply in thread is not supported"),
+    );
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-existing-project",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    database.selectProject("chat-owner", "demo");
+    database.upsertThread({
+      threadId: "thread-existing",
+      projectId: "demo",
+      title: "Existing work",
+    });
+    database.setThread("chat-owner", "demo", "thread-existing");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/menu", "topic-failure-menu");
+    await vi.waitFor(() => expect(channel.sent.length).toBeGreaterThan(0));
+    const cardMessageId = channel.latestCardMessageIdForChat("chat-owner");
+
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "topic-failure-open",
+      "owner",
+      cardMessageId,
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) =>
+            message.kind === "card" &&
+            message.chatId === "chat-existing-project" &&
+            JSON.stringify(message.card).includes("飞书错误码 230071"),
+        ),
+      ).toBe(true),
+    );
+    expect(channel.updatedCards.at(-1)?.messageId).toBe(cardMessageId);
+    expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("项目群已打开");
+    expect(database.getFeishuThreadRoute("thread-existing")).toBeUndefined();
+    expect(
+      channel.sent.some((message) => message.text === "❌ Request failed with status code 400"),
+    ).toBe(false);
+  });
+
   it("rebuilds a dissolved project group while preserving Codex history", async () => {
     const channel = new FakeChannel();
     channel.inspectProjectSpace.mockResolvedValueOnce({ status: "dissolved" });
+    const codex = fakeCodex();
+    vi.mocked(codex.readThreadDetails).mockResolvedValue({
+      id: "thread-existing",
+      name: "Existing work",
+      preview: "",
+      cwd: process.cwd(),
+      updatedAt: Date.now(),
+      status: "notLoaded",
+      turns: [
+        {
+          id: "turn-1",
+          status: "completed",
+          startedAt: null,
+          completedAt: null,
+          messages: [
+            { role: "user", text: "历史问题", phase: null },
+            { role: "assistant", text: "中间过程不应恢复", phase: "commentary" },
+            { role: "assistant", text: "历史答案", phase: "final_answer" },
+          ],
+        },
+        {
+          id: "turn-2",
+          status: "completed",
+          startedAt: null,
+          completedAt: null,
+          messages: [
+            { role: "user", text: "第二个问题", phase: null },
+            { role: "assistant", text: "答案上半段", phase: "final_answer" },
+            { role: "assistant", text: "答案下半段", phase: "final_answer" },
+          ],
+        },
+      ],
+    });
     const database = new BridgeDatabase(":memory:");
     database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
     database.upsertThread({
@@ -938,7 +1198,7 @@ describe("Bridge vertical slice", () => {
     database.setThread("chat-owner", "demo", "thread-existing");
     bridge = new Bridge({
       channel,
-      codex: fakeCodex(),
+      codex,
       database,
       config,
       projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
@@ -966,14 +1226,20 @@ describe("Bridge vertical slice", () => {
     expect(channel.createProjectSpace).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: "demo", ownerOpenId: "owner" }),
     );
+    const historyMessages = channel.createProjectTopic.mock.calls.at(-1)?.[0].historyMessages ?? [];
+    expect(historyMessages.join("\n")).toContain("**👤 用户**\n历史问题");
+    expect(historyMessages.join("\n")).toContain("**🤖 Codex**\n历史答案");
+    expect(historyMessages.join("\n")).not.toContain("中间过程不应恢复");
+    expect(historyMessages.join("\n")).toContain("答案上半段\n\n答案下半段");
   });
 
   it("migrates a legacy topic group and keeps project controls inside the group", async () => {
-    const channel = new FakeChannel();
+    const channel = new FakeChannel({ updateCards: true });
     channel.inspectProjectSpace.mockResolvedValueOnce({
       status: "ready",
       displayName: "[Codex] Demo",
       messageMode: "thread",
+      canConfigure: true,
     });
     const database = new BridgeDatabase(":memory:");
     database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
@@ -998,6 +1264,7 @@ describe("Bridge vertical slice", () => {
     await vi.waitFor(() =>
       expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
     );
+    const privateControlCardId = channel.latestCardMessageIdForChat("chat-owner");
     await channel.receiveCard(
       { version: 1, action: "project.space", projectId: "demo" },
       "open-existing-group",
@@ -1026,14 +1293,19 @@ describe("Bridge vertical slice", () => {
       "chat-existing-project",
     );
     await vi.waitFor(() =>
-      expect(database.getConversation("chat-existing-project")?.threadId).toBe("thread-created-1"),
+      expect(
+        database.resolveFeishuPendingTopic("chat-existing-project", "topic-created-thread"),
+      ).toMatchObject({ projectId: "demo" }),
     );
     expect(channel.createProjectTopic).toHaveBeenCalledWith(
       expect.objectContaining({
         chatId: "chat-existing-project",
-        idempotencyKey: "clawbridge-thread-thread-created-1",
+        idempotencyKey: expect.stringMatching(/^clawbridge-new-topic-/),
+        title: "新对话",
+        historyMessages: [],
       }),
     );
+    const originalTopicKey = channel.createProjectTopic.mock.calls.at(-1)?.[0].idempotencyKey;
     expect(
       channel.sent.some(
         (message) =>
@@ -1042,6 +1314,109 @@ describe("Bridge vertical slice", () => {
           message.audience === "group",
       ),
     ).toBe(true);
+    expect(database.getConversation("chat-existing-project")?.threadId).toBeNull();
+
+    // Old cards can still contain project.leave. They must only refresh to the
+    // new confirmed destructive action instead of deleting immediately.
+    await channel.receiveCard(
+      { version: 1, action: "project.leave", projectId: "demo" },
+      "group-leave",
+      "owner",
+      groupCardId,
+      undefined,
+      "chat-existing-project",
+    );
+    await vi.waitFor(() =>
+      expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("退出并丢弃项目群"),
+    );
+    expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("确认退出并丢弃项目群");
+    expect(channel.removeProjectSpaceMember).not.toHaveBeenCalled();
+    expect(channel.deleteProjectSpace).not.toHaveBeenCalled();
+    expect(database.getFeishuProjectSpace("demo")).toBeDefined();
+
+    await channel.receiveCard(
+      { version: 1, action: "project.dissolve", projectId: "demo" },
+      "group-dissolve",
+      "owner",
+      groupCardId,
+      undefined,
+      "chat-existing-project",
+    );
+    await vi.waitFor(() =>
+      expect(channel.deleteProjectSpace).toHaveBeenCalledWith({ chatId: "chat-existing-project" }),
+    );
+    expect(database.getFeishuProjectSpace("demo")).toBeUndefined();
+    database.selectProject("chat-owner", "demo");
+    database.setThread("chat-owner", "demo", "thread-created-1");
+
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "open-fresh-group",
+      "owner",
+      privateControlCardId,
+      undefined,
+      "chat-owner",
+    );
+    await vi.waitFor(() => expect(channel.createProjectSpace).toHaveBeenCalledTimes(1));
+    expect(database.getFeishuProjectSpace("demo")?.chatId).toBe("chat-created-project");
+    await vi.waitFor(() => expect(channel.createProjectTopic).toHaveBeenCalledTimes(2));
+    const replacementTopicKey = channel.createProjectTopic.mock.calls.at(-1)?.[0].idempotencyKey;
+    expect(replacementTopicKey).toMatch(/^clawbridge-topic-[0-9a-f]{32}$/);
+    expect(replacementTopicKey).not.toBe(originalTopicKey);
+  });
+
+  it("opens a legacy project group even when Feishu rejects the message-mode migration", async () => {
+    const channel = new FakeChannel();
+    channel.inspectProjectSpace.mockResolvedValueOnce({
+      status: "ready",
+      displayName: "[Codex] Demo",
+      messageMode: "thread",
+      canConfigure: true,
+    });
+    channel.configureProjectSpace.mockRejectedValueOnce(
+      new Error("Request failed with status code 400"),
+    );
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-existing-project",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    database.selectProject("chat-owner", "demo");
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/menu", "legacy-group-menu");
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+    );
+
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "legacy-group-open",
+    );
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) =>
+            message.kind === "card" &&
+            message.chatId === "chat-existing-project" &&
+            JSON.stringify(message.card).includes("项目群模式暂未迁移"),
+        ),
+      ).toBe(true),
+    );
+    expect(
+      channel.sent.some((message) => message.text.includes("Request failed with status code 400")),
+    ).toBe(false);
   });
 
   it("lists and selects an existing thread through card actions", async () => {
@@ -1107,6 +1482,187 @@ describe("Bridge vertical slice", () => {
       expect(database.getConversation("chat-owner")?.threadId).toBe("thread-existing"),
     );
     expect(codex.readThread).toHaveBeenCalledWith("thread-existing");
+  });
+
+  it("treats a legacy thread.show card as continue-conversation without a detail page", async () => {
+    const channel = new FakeChannel({ updateCards: true });
+    const codex = fakeCodex();
+    vi.mocked(codex.listThreads).mockImplementation(async (input) =>
+      input.archived
+        ? []
+        : [
+            {
+              id: "thread-existing",
+              name: "Existing work",
+              preview: "Continue here",
+              cwd: process.cwd(),
+              updatedAt: Date.now(),
+              status: "notLoaded",
+            },
+          ],
+    );
+    vi.mocked(codex.readThreadDetails).mockResolvedValue({
+      id: "thread-existing",
+      name: "Existing work",
+      preview: "Continue here",
+      cwd: process.cwd(),
+      updatedAt: Date.now(),
+      status: "notLoaded",
+      turns: Array.from({ length: 4 }, (_, index) => ({
+        id: `turn-history-${index + 1}`,
+        status: "completed",
+        startedAt: null,
+        completedAt: null,
+        messages: [
+          { role: "user" as const, text: `history-${index * 2 + 1}`, phase: null },
+          {
+            role: "assistant" as const,
+            text: `history-${index * 2 + 2}`,
+            phase: "final_answer",
+          },
+        ],
+      })),
+    });
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    database.selectProject("chat-owner", "demo");
+    database.upsertThread({
+      threadId: "thread-existing",
+      projectId: "demo",
+      title: "Existing work",
+      status: "notLoaded",
+    });
+
+    await channel.receive("/menu", "thread-detail-menu");
+    await vi.waitFor(() => expect(channel.sent.length).toBeGreaterThan(0));
+    const cardMessageId = channel.latestCardMessageIdForChat("chat-owner");
+    await channel.receiveCard(
+      {
+        version: 1,
+        action: "thread.show",
+        projectId: "demo",
+        threadId: "thread-existing",
+      },
+      "thread-detail-show",
+      "owner",
+      cardMessageId,
+    );
+
+    await vi.waitFor(() => expect(channel.createProjectTopic).toHaveBeenCalledTimes(1));
+    expect(database.getFeishuThreadRoute("thread-existing")).toMatchObject({
+      projectId: "demo",
+      topicRootId: "topic-created-thread",
+    });
+    expect(JSON.stringify(channel.updatedCards)).not.toContain("查看对话内容");
+    expect(JSON.stringify(channel.updatedCards)).not.toContain("上一轮");
+  });
+
+  it("keeps control-card navigation on the original Feishu message", async () => {
+    const channel = new FakeChannel({ updateCards: true });
+    const codex = fakeCodex();
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.selectProject("chat-owner", "demo");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    await bridge.start();
+    await channel.receive("/menu", "single-card-menu");
+    await vi.waitFor(() => expect(channel.sent.length).toBeGreaterThan(0));
+    const cardMessageId = channel.latestCardMessageIdForChat("chat-owner");
+
+    await channel.receiveCard(
+      { version: 1, action: "project.list" },
+      "single-card-projects",
+      "owner",
+      cardMessageId,
+    );
+    await vi.waitFor(() => expect(channel.updatedCards).toHaveLength(1));
+    expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("选择项目");
+
+    await channel.receiveCard(
+      { version: 1, action: "project.use", projectId: "demo" },
+      "single-card-project-use",
+      "owner",
+      cardMessageId,
+    );
+    await vi.waitFor(() => expect(channel.updatedCards).toHaveLength(2));
+    expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("项目群已创建");
+    expect(channel.createProjectSpace).toHaveBeenCalledTimes(1);
+    expect(
+      channel.sent.filter(
+        (message) => message.kind === "card" && message.chatId === "chat-created-project",
+      ),
+    ).toHaveLength(1);
+    const sentAfterProjectCreation = channel.sent.length;
+
+    await channel.receiveCard(
+      { version: 1, action: "project.space", projectId: "demo" },
+      "single-card-project-space",
+      "owner",
+      cardMessageId,
+    );
+    await vi.waitFor(() => expect(channel.updatedCards).toHaveLength(4));
+    expect(channel.sent).toHaveLength(sentAfterProjectCreation);
+    expect(
+      channel.updatedCards.some(
+        (entry) =>
+          entry.messageId !== cardMessageId && JSON.stringify(entry.card).includes("项目控制台"),
+      ),
+    ).toBe(true);
+
+    database.upsertThread({ threadId: "thread-model", projectId: "demo", title: "Model thread" });
+    database.setThread("chat-owner", "demo", "thread-model");
+    await channel.receiveCard(
+      { version: 1, action: "menu.refresh" },
+      "single-card-home",
+      "owner",
+      cardMessageId,
+    );
+    await vi.waitFor(() => expect(channel.updatedCards).toHaveLength(5));
+    expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("ClawBridge 控制台");
+
+    await channel.receiveCard(
+      { version: 1, action: "task.list", projectId: "demo" },
+      "single-card-tasks",
+      "owner",
+      cardMessageId,
+    );
+    await vi.waitFor(() => expect(channel.updatedCards).toHaveLength(6));
+    expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("任务中心");
+
+    await channel.receiveCard(
+      {
+        version: 1,
+        action: "model.list",
+        projectId: "demo",
+        threadId: "thread-model",
+      },
+      "single-card-models",
+      "owner",
+      cardMessageId,
+    );
+    await vi.waitFor(() => expect(channel.updatedCards).toHaveLength(7));
+    expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("模型与推理强度");
+    expect(channel.updatedCards.filter((entry) => entry.messageId === cardMessageId)).toHaveLength(
+      6,
+    );
+    expect(channel.sent).toHaveLength(sentAfterProjectCreation);
   });
 
   it("discovers a Desktop thread whose historical cwd resolves to the current project", async () => {
