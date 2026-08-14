@@ -9,6 +9,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function sanitizeHistoryCardMarkdown(markdown: string): string {
+  let insideFence = false;
+  return markdown
+    .split("\n")
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        insideFence = !insideFence;
+        return line;
+      }
+      if (insideFence) return line;
+      return line
+        .replace(
+          /!\[([^\]]*)\]\([^\r\n)]*\)/g,
+          (_match, alt: string) => `🖼️ ${alt.trim() || "图片"}（图片未同步）`,
+        )
+        .replace(/<img\b[^>]*>/gi, "🖼️ 图片（图片未同步）");
+    })
+    .join("\n");
+}
+
 function convertCardButton(
   input: Record<string, unknown>,
   elementId: string,
@@ -663,7 +683,7 @@ export class FeishuAdapter implements ChannelAdapter {
   private async createHistoryCard(message: string): Promise<string> {
     const [firstLine = "历史对话", ...remainingLines] = message.split("\n");
     const title = firstLine.trim().slice(0, 80) || "历史对话";
-    const content = remainingLines.join("\n").trim() || message.trim();
+    const content = sanitizeHistoryCardMarkdown(remainingLines.join("\n").trim() || message.trim());
     const card = {
       schema: "2.0",
       config: { summary: { content: title } },

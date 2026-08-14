@@ -576,9 +576,11 @@ function quotaWindowText(
 ): string {
   const remaining = Math.max(0, Math.min(100, 100 - value.usedPercent));
   const duration = value.windowDurationMins
-    ? value.windowDurationMins % 60 === 0
-      ? `${value.windowDurationMins / 60} 小时`
-      : `${value.windowDurationMins} 分钟`
+    ? value.windowDurationMins % (24 * 60) === 0
+      ? `${value.windowDurationMins / (24 * 60)} 天`
+      : value.windowDurationMins % 60 === 0
+        ? `${value.windowDurationMins / 60} 小时`
+        : `${value.windowDurationMins} 分钟`
     : "当前窗口";
   const reset = value.resetsAt
     ? new Date(value.resetsAt * 1_000).toLocaleString("zh-CN", { hour12: false })

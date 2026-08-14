@@ -726,6 +726,33 @@ describe("Feishu adapter card contract", () => {
     });
   });
 
+  it("replaces local Markdown images before creating a history card", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await adapter.createProjectTopic({
+      chatId: "oc-project-1",
+      title: "含本机图片的历史",
+      idempotencyKey: "thread-local-image",
+      historyMessages: [
+        "第 1 轮\n\n图片如下：![运行截图](/C:/Users/Ruyi/Documents/Codex/result.png)",
+      ],
+    });
+
+    const request = larkMocks.createCard.mock.calls.at(-1)?.[0] as {
+      data: { data: string };
+    };
+    const card = JSON.parse(request.data.data) as {
+      body: { elements: Array<{ content: string }> };
+    };
+    const content = card.body.elements[0]?.content ?? "";
+    expect(content).toContain("🖼️ 运行截图（图片未同步）");
+    expect(content).not.toContain("/C:/Users/Ruyi");
+    expect(content).not.toContain("![运行截图]");
+  });
+
   it("creates, updates, and finalizes a CardKit task stream inside a topic", async () => {
     const adapter = new FeishuAdapter(
       { appId: "cli-test", appSecret: "secret" },

@@ -296,6 +296,8 @@ describe("Feishu card rendering", () => {
     });
     expect(JSON.stringify(card)).toContain("剩余 75%");
     expect(JSON.stringify(card)).toContain("剩余 60%");
+    expect(JSON.stringify(card)).toContain("次要额度（7 天）");
+    expect(JSON.stringify(card)).not.toContain("168 小时");
     expect(JSON.stringify(card)).toContain("可用额度重置次数");
     expect(actions(card).map((item) => item.action)).toEqual(["quota.show", "menu.refresh"]);
   });
