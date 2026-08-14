@@ -126,6 +126,14 @@ const actionSchemas = [
   z
     .object({
       version: z.literal(CARD_VERSION),
+      action: z.literal("model.close"),
+      projectId: projectIdSchema,
+      threadId: threadIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
       action: z.literal("model.use"),
       projectId: projectIdSchema,
       threadId: threadIdSchema,
@@ -303,7 +311,7 @@ export interface FeishuCard {
     enable_forward: false;
     update_multi: false;
   };
-  header: {
+  header?: {
     template: "blue";
     title: { tag: "plain_text"; content: string };
   };
@@ -378,6 +386,13 @@ function card(title: string, elements: Array<Record<string, unknown>>): FeishuCa
       template: "blue",
       title: { tag: "plain_text", content: title },
     },
+    elements,
+  };
+}
+
+function compactCard(elements: Array<Record<string, unknown>>): FeishuCard {
+  return {
+    config: { wide_screen_mode: true, enable_forward: false, update_multi: false },
     elements,
   };
 }
@@ -534,13 +549,15 @@ export function renderProjectSpaceCard(input: ProjectSpaceCardInput): FeishuCard
 }
 
 export function renderConversationToolbarCard(input: ConversationToolbarCardInput): FeishuCard {
-  return card(`对话 #${input.thread.localNumber} · 会话工具栏`, [
-    markdown(
-      `**${displayText(input.thread.title || "未命名对话", 60)}**\n\n**模型：** ${displayText(input.selectedModel || "Codex 默认", 48)}\n**推理强度：** ${displayText(input.selectedReasoningEffort || "模型默认", 32)}\n\n直接在本话题发送下一项任务；发送“模型”也可随时重新打开设置。`,
-    ),
-    actionRow([
-      button(
-        "切换模型",
+  return compactCard([
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: `**${displayText(input.selectedModel || "Codex 默认", 40)}** · ${displayText(input.selectedReasoningEffort || "默认强度", 24)}`,
+      },
+      extra: button(
+        "切换",
         action({
           version: CARD_VERSION,
           action: "model.list",
@@ -549,7 +566,7 @@ export function renderConversationToolbarCard(input: ConversationToolbarCardInpu
         }),
         "primary",
       ),
-    ]),
+    },
   ]);
 }
 
@@ -679,35 +696,27 @@ export function renderProjectCreateCard(): FeishuCard {
 }
 
 export function renderModelListCard(input: ModelListCardInput): FeishuCard {
-  const elements: Array<Record<string, unknown>> = [
-    markdown(
-      `**对话：** #${input.thread.localNumber} ${displayText(input.thread.title || "未命名", 48)}`,
-    ),
-    markdown(
-      `**当前模型：** ${displayText(input.selectedModel || "Codex 默认", 48)}\n**推理强度：** ${displayText(input.selectedReasoningEffort || "模型默认", 32)}`,
-    ),
-    divider(),
-  ];
+  const elements: Array<Record<string, unknown>> = [];
   for (const model of input.models.slice(0, MAX_LIST_ITEMS)) {
     const selected = model.model === input.selectedModel;
-    elements.push(
-      markdown(
-        `**${displayText(model.displayName, 52)}**${model.isDefault ? " · 默认" : ""}\n${displayText(model.description, 100)}`,
+    elements.push({
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: `${selected ? "✓ " : ""}**${displayText(model.displayName, 44)}**${model.isDefault ? " · 默认" : ""}`,
+      },
+      extra: button(
+        selected ? "当前" : "选择",
+        action({
+          version: CARD_VERSION,
+          action: "model.use",
+          projectId: input.project.id,
+          threadId: input.thread.id,
+          model: model.model,
+        }),
+        selected ? "primary" : "default",
       ),
-      actionRow([
-        button(
-          selected ? "当前模型" : "选择模型",
-          action({
-            version: CARD_VERSION,
-            action: "model.use",
-            projectId: input.project.id,
-            threadId: input.thread.id,
-            model: model.model,
-          }),
-          selected ? "primary" : "default",
-        ),
-      ]),
-    );
+    });
     if (selected) {
       const efforts = model.supportedReasoningEfforts.slice(0, 4).map((effort) =>
         button(
@@ -731,12 +740,18 @@ export function renderModelListCard(input: ModelListCardInput): FeishuCard {
   elements.push(
     divider(),
     actionRow([
-      input.projectSpace
-        ? button("返回项目", projectScopedAction("project.space", input.project.id))
-        : button("返回控制台", action({ version: CARD_VERSION, action: "menu.refresh" })),
+      button(
+        "收起",
+        action({
+          version: CARD_VERSION,
+          action: "model.close",
+          projectId: input.project.id,
+          threadId: input.thread.id,
+        }),
+      ),
     ]),
   );
-  return card("模型与推理强度", elements);
+  return card("切换模型", elements);
 }
 
 export function renderApprovalCard(input: ApprovalCardInput): FeishuCard {

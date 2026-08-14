@@ -928,6 +928,14 @@ export class Bridge {
       case "model.list":
         await this.showModelCard(event.chatId, action.projectId, action.threadId, event.messageId);
         return;
+      case "model.close":
+        await this.assertAndShowConversationToolbar(
+          event.chatId,
+          action.projectId,
+          action.threadId,
+          event.messageId,
+        );
+        return;
       case "model.use":
         await this.setModelSettings(
           event.chatId,
@@ -1674,31 +1682,57 @@ export class Bridge {
     }
   }
 
-  private async showConversationToolbar(projectId: string, threadId: string): Promise<void> {
+  private async showConversationToolbar(
+    projectId: string,
+    threadId: string,
+    replaceMessageId?: string,
+  ): Promise<void> {
     const { database } = this.dependencies;
     const project = database.getProject(projectId);
     const thread = database.getProjectThread(projectId, threadId);
     const route = database.getFeishuThreadRoute(threadId);
     if (!project || !thread || !route || route.projectId !== projectId) return;
     const execution = database.getThreadExecutionSettings(threadId);
-    this.replyCard(
-      route.chatId,
-      renderConversationToolbarCard({
-        project: { id: project.id, name: project.name },
-        thread: {
-          id: thread.threadId,
-          projectId: thread.projectId,
-          localNumber: thread.localNumber,
-          title: thread.title,
-        },
-        selectedModel: execution?.model ?? null,
-        selectedReasoningEffort: execution?.reasoningEffort ?? null,
-      }),
-      `对话 #${thread.localNumber} 会话工具栏`,
-      "group",
-      route.topicRootId,
-    );
+    const card = renderConversationToolbarCard({
+      project: { id: project.id, name: project.name },
+      thread: {
+        id: thread.threadId,
+        projectId: thread.projectId,
+        localNumber: thread.localNumber,
+        title: thread.title,
+      },
+      selectedModel: execution?.model ?? null,
+      selectedReasoningEffort: execution?.reasoningEffort ?? null,
+    });
+    if (replaceMessageId) {
+      await this.updateOrReplyCard(
+        replaceMessageId,
+        route.chatId,
+        card,
+        `对话 #${thread.localNumber} 模型设置`,
+        "group",
+        route.topicRootId,
+      );
+    } else {
+      this.replyCard(
+        route.chatId,
+        card,
+        `对话 #${thread.localNumber} 模型设置`,
+        "group",
+        route.topicRootId,
+      );
+    }
     await this.drainDeliveries();
+  }
+
+  private async assertAndShowConversationToolbar(
+    chatId: string,
+    projectId: string,
+    threadId: string,
+    replaceMessageId: string,
+  ): Promise<void> {
+    this.assertModelTarget(chatId, projectId, threadId);
+    await this.showConversationToolbar(projectId, threadId, replaceMessageId);
   }
 
   private assertModelTarget(chatId: string, projectId: string, threadId: string): void {
@@ -1789,7 +1823,11 @@ export class Bridge {
       throw new Error("该推理强度不受当前模型支持，请重新选择。 ");
     }
     database.setThreadExecutionSettings(threadId, model.model, effort);
-    await this.showModelCard(chatId, projectId, threadId, replaceMessageId);
+    if (database.getFeishuProjectSpaceByChat(chatId) && replaceMessageId) {
+      await this.showConversationToolbar(projectId, threadId, replaceMessageId);
+    } else {
+      await this.showModelCard(chatId, projectId, threadId, replaceMessageId);
+    }
   }
 
   private async showThreadCard(
@@ -2659,6 +2697,8 @@ export class Bridge {
     chatId: string,
     card: FeishuCard,
     fallbackText: string,
+    audience?: "p2p" | "group",
+    replyToMessageId?: string,
   ): Promise<void> {
     const update = this.dependencies.channel.updateCardMessage;
     if (update) {
@@ -2682,7 +2722,7 @@ export class Bridge {
         );
       }
     }
-    this.replyCard(chatId, card, fallbackText);
+    this.replyCard(chatId, card, fallbackText, audience, replyToMessageId);
   }
 
   private drainDeliveries(): Promise<void> {

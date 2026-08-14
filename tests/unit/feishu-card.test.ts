@@ -3,6 +3,7 @@ import {
   parseCardAction,
   renderConversationToolbarCard,
   renderHomeCard,
+  renderModelListCard,
   renderQuotaCard,
   renderProjectSpaceCard,
   renderApprovalCard,
@@ -58,6 +59,23 @@ describe("parseCardAction", () => {
       { version: 1, action: "thread.use", projectId: "claw", threadId: "019f-aa" },
       { version: 1, action: "thread.new", projectId: "claw" },
       { version: 1, action: "thread.show", projectId: "claw", threadId: "019f-aa" },
+      { version: 1, action: "model.list", projectId: "claw", threadId: "019f-aa" },
+      { version: 1, action: "model.close", projectId: "claw", threadId: "019f-aa" },
+      {
+        version: 1,
+        action: "model.use",
+        projectId: "claw",
+        threadId: "019f-aa",
+        model: "gpt-test",
+      },
+      {
+        version: 1,
+        action: "reasoning.use",
+        projectId: "claw",
+        threadId: "019f-aa",
+        model: "gpt-test",
+        reasoningEffort: "high",
+      },
       { version: 1, action: "task.stop" },
       { version: 1, action: "chat.close" },
     ];
@@ -119,7 +137,7 @@ describe("Feishu card rendering", () => {
       notice: "直接发送自然语言即可创建任务",
     });
 
-    expect(card.header.title.content).toBe("ClawBridge 控制台");
+    expect(card.header?.title.content).toBe("ClawBridge 控制台");
     expect(actions(card).map((item) => item.action)).toEqual([
       "project.list",
       "menu.refresh",
@@ -190,7 +208,7 @@ describe("Feishu card rendering", () => {
         title: "修复登录",
       },
     });
-    expect(card.header.title.content).toBe("Demo · 项目控制台");
+    expect(card.header?.title.content).toBe("Demo · 项目控制台");
     expect(actions(card).map((item) => item.action)).toEqual([
       "thread.list",
       "thread.new",
@@ -213,8 +231,54 @@ describe("Feishu card rendering", () => {
     expect(actions(card)).toEqual([
       { version: 1, action: "model.list", projectId: "demo", threadId: "thread-1" },
     ]);
-    expect(JSON.stringify(card)).toContain("直接在本话题发送下一项任务");
+    expect(card.header).toBeUndefined();
+    expect(card.elements).toHaveLength(1);
+    expect(JSON.stringify(card)).toContain("gpt-test");
+    expect(JSON.stringify(card)).toContain("high");
+    expect(JSON.stringify(card)).not.toContain("直接在本话题发送下一项任务");
     expect(JSON.stringify(card)).not.toContain("查看状态");
+  });
+
+  it("renders a compact model picker without descriptions or project navigation", () => {
+    const card = renderModelListCard({
+      project: { id: "demo", name: "Demo" },
+      thread: { id: "thread-1", projectId: "demo", localNumber: 3, title: "修复登录" },
+      models: [
+        {
+          model: "gpt-test",
+          displayName: "GPT Test",
+          description: "This description must not consume mobile space.",
+          isDefault: true,
+          defaultReasoningEffort: "medium",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "medium", description: "Balanced" },
+            { reasoningEffort: "high", description: "Deep" },
+          ],
+        },
+        {
+          model: "gpt-fast",
+          displayName: "GPT Fast",
+          description: "Another long description.",
+          isDefault: false,
+          defaultReasoningEffort: "low",
+          supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }],
+        },
+      ],
+      selectedModel: "gpt-test",
+      selectedReasoningEffort: "high",
+      projectSpace: true,
+    });
+    expect(card.header?.title.content).toBe("切换模型");
+    expect(JSON.stringify(card)).not.toContain("This description");
+    expect(JSON.stringify(card)).not.toContain("Another long description");
+    expect(JSON.stringify(card)).not.toContain("返回项目");
+    expect(actions(card).map((item) => item.action)).toEqual([
+      "model.use",
+      "reasoning.use",
+      "reasoning.use",
+      "model.use",
+      "model.close",
+    ]);
   });
 
   it("renders remaining quota and refresh controls", () => {
@@ -402,7 +466,7 @@ describe("Feishu card rendering", () => {
       totalPages: 2,
     });
 
-    expect(card.header.title.content).toBe("项目任务中心");
+    expect(card.header?.title.content).toBe("项目任务中心");
     expect(JSON.stringify(card)).toContain("正在同步数据库");
     expect(actions(card)).toContainEqual({
       version: 1,

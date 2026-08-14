@@ -672,14 +672,14 @@ describe("Bridge vertical slice", () => {
           (message) =>
             message.kind === "card" &&
             message.replyToMessageId === "topic-root-1" &&
-            JSON.stringify(message.card).includes("会话工具栏"),
+            JSON.stringify(message.card).includes("model.list"),
         ),
       ).toBe(true),
     );
   });
 
   it("opens model settings at the bottom when a project topic receives the exact model keyword", async () => {
-    const channel = new FakeChannel();
+    const channel = new FakeChannel({ updateCards: true });
     const codex = fakeCodex();
     const database = new BridgeDatabase(":memory:");
     database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
@@ -722,6 +722,28 @@ describe("Bridge vertical slice", () => {
       ).toBe(true),
     );
     expect(codex.runTurn).not.toHaveBeenCalled();
+
+    const modelCardMessageId = channel.latestCardMessageIdForChat("chat-group");
+    await channel.receiveCard(
+      {
+        version: 1,
+        action: "model.use",
+        projectId: "demo",
+        threadId: "thread-topic",
+        model: "gpt-test",
+      },
+      "topic-model-use",
+      "owner",
+      modelCardMessageId,
+      undefined,
+      "chat-group",
+    );
+    await vi.waitFor(() => expect(channel.updatedCards).toHaveLength(1));
+    const compactCard = channel.updatedCards[0]?.card;
+    expect(compactCard).not.toHaveProperty("header");
+    expect(JSON.stringify(compactCard)).toContain("model.list");
+    expect(JSON.stringify(compactCard)).not.toContain("项目控制台");
+    expect(JSON.stringify(compactCard)).not.toContain("Test model");
   });
 
   it("keeps model settings out of the project group's main chat", async () => {
@@ -1709,7 +1731,7 @@ describe("Bridge vertical slice", () => {
             message.kind === "card" &&
             message.chatId === "chat-created-project" &&
             message.replyToMessageId === "topic-created-thread" &&
-            message.text.includes("会话工具栏"),
+            message.text.includes("模型设置"),
         ),
       ).toBe(true),
     );
@@ -1903,7 +1925,7 @@ describe("Bridge vertical slice", () => {
       cardMessageId,
     );
     await vi.waitFor(() => expect(channel.updatedCards).toHaveLength(7));
-    expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("模型与推理强度");
+    expect(JSON.stringify(channel.updatedCards.at(-1)?.card)).toContain("切换模型");
     expect(channel.updatedCards.filter((entry) => entry.messageId === cardMessageId)).toHaveLength(
       6,
     );
