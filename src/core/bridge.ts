@@ -87,6 +87,8 @@ export class Bridge {
   private readonly projectNumbers = new Map<string, number>();
   private desktopSyncWarning: string | undefined;
   private desktopRefreshPromise: Promise<void> | undefined;
+  private desktopSyncTimer: NodeJS.Timeout | undefined;
+  private desktopSnapshotSignature: string | undefined;
   private codexClosing = false;
   private readonly pendingInteractions = new Map<
     string,
@@ -138,6 +140,15 @@ export class Bridge {
     database.syncProjects(bootstrapProjects);
     await this.refreshDesktopProjects();
     if (this.stopping) return;
+    if (
+      this.dependencies.desktopProjects?.registerProject &&
+      this.dependencies.config.projectManagement.codexDesktopProjects.registerCreatedProjects
+    ) {
+      this.desktopSyncTimer = setInterval(() => {
+        void this.refreshDesktopProjects();
+      }, 5_000);
+      this.desktopSyncTimer.unref();
+    }
     await this.assertUniqueProjectRoots(database.listProjects());
     if (this.stopping) return;
     const interrupted = database.interruptRunningTasks();
@@ -163,6 +174,7 @@ export class Bridge {
   private async stopOnce(): Promise<void> {
     this.stopping = true;
     if (this.deliveryTimer) clearTimeout(this.deliveryTimer);
+    if (this.desktopSyncTimer) clearInterval(this.desktopSyncTimer);
     await this.dependencies.channel.stop();
     if (this.startPromise) await Promise.allSettled([this.startPromise]);
     await this.dependencies.channel.stop();
@@ -172,6 +184,7 @@ export class Bridge {
       ...this.immediateTasks,
       ...(this.queueWorker ? [this.queueWorker] : []),
       ...(this.deliveryWorker ? [this.deliveryWorker] : []),
+      ...(this.desktopRefreshPromise ? [this.desktopRefreshPromise] : []),
     ]);
     // A final stop closes the narrow race where an already-running handler passed its guard at
     // the same time shutdown began. Handlers also guard every post-await Codex call below.
@@ -833,7 +846,7 @@ export class Bridge {
         if (!name || name.length > 80 || /[\\/:*?"<>|\r\n]/.test(name)) {
           throw new Error("项目名称需为 1–80 个字符，且不能包含路径保留字符。 ");
         }
-        const projectId = this.mobileProjectId(name);
+        const projectId = this.mobileProjectId();
         const project = await this.projectManager.createProject(projectId, name, name);
         await this.registerCreatedDesktopProject(project);
         this.dependencies.database.selectProject(event.chatId, project.id);
@@ -2171,19 +2184,7 @@ export class Bridge {
     this.reply(chatId, `已启用项目 ${project.name} (${project.id})。`);
   }
 
-  private mobileProjectId(name: string): string {
-    const candidate = name
-      .normalize("NFKC")
-      .toLocaleLowerCase()
-      .replace(/[^a-z0-9_-]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 64);
-    if (
-      /^[a-z0-9][a-z0-9_-]{0,63}$/.test(candidate) &&
-      !this.dependencies.database.getProject(candidate)
-    ) {
-      return candidate;
-    }
+  private mobileProjectId(): string {
     return `mobile-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   }
 
@@ -2843,6 +2844,23 @@ export class Bridge {
 
   private async refreshDesktopProjectsOnce(source: DesktopProjectSource): Promise<void> {
     try {
+      const registrationWarnings: string[] = [];
+      if (
+        source.registerProject &&
+        this.dependencies.config.projectManagement.codexDesktopProjects.registerCreatedProjects
+      ) {
+        const managedProjects = this.dependencies.database
+          .listProjects({ includeDisabled: false })
+          .filter((project) => project.id.startsWith("mobile-"));
+        for (const project of managedProjects) {
+          try {
+            await source.registerProject({ name: project.name, rootPath: project.rootPath });
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            registrationWarnings.push(`${project.name} 无法登记到 Codex Desktop（${detail}）`);
+          }
+        }
+      }
       const snapshot = await source.listProjects();
       if (snapshot.usedBackup) {
         this.revokeDesktopProjectSnapshot(
@@ -2894,15 +2912,23 @@ export class Bridge {
         if (this.desktopProjectIds.has(projectId))
           this.desktopThreadProjects.set(threadId, projectId);
       }
-      this.desktopSyncWarning = warnings.length > 0 ? warnings.join("；") : undefined;
-      this.dependencies.logger.info(
-        {
-          discovered: snapshot.projects.length,
-          synchronized: records.length,
-          usedBackup: snapshot.usedBackup,
-        },
-        "Synchronized Codex Desktop projects",
-      );
+      const allWarnings = [...registrationWarnings, ...warnings];
+      this.desktopSyncWarning = allWarnings.length > 0 ? allWarnings.join("；") : undefined;
+      const signature = JSON.stringify({
+        records: records.map((record) => [record.id, record.name, record.rootPath]),
+        warning: this.desktopSyncWarning ?? null,
+      });
+      if (signature !== this.desktopSnapshotSignature) {
+        this.desktopSnapshotSignature = signature;
+        this.dependencies.logger.info(
+          {
+            discovered: snapshot.projects.length,
+            synchronized: records.length,
+            usedBackup: snapshot.usedBackup,
+          },
+          "Synchronized Codex Desktop projects",
+        );
+      }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.revokeDesktopProjectSnapshot(`Codex Desktop 项目同步失败：${detail}`);
@@ -2916,6 +2942,7 @@ export class Bridge {
     this.desktopProjectIds.clear();
     this.desktopThreadProjects.clear();
     this.desktopSyncWarning = warning;
+    this.desktopSnapshotSignature = undefined;
   }
 
   private orderedProjects(includeDisabled = false): ProjectRecord[] {

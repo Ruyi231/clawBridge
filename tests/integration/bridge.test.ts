@@ -1112,10 +1112,25 @@ describe("Bridge vertical slice", () => {
     const root = mkdtempSync(path.join(tmpdir(), "clawbridge-mobile-project-"));
     const channel = new FakeChannel();
     const database = new BridgeDatabase(":memory:");
-    const registerProject = vi.fn(async () => ({ sourceId: "desktop-test", created: true }));
+    let registeredProject: { name: string; rootPath: string } | undefined;
+    const registerProject = vi.fn(async (input: { name: string; rootPath: string }) => {
+      const created = !registeredProject;
+      registeredProject = input;
+      return { sourceId: "desktop-test", created };
+    });
     const desktopProjects: DesktopProjectSource = {
       listProjects: vi.fn(async () => ({
-        projects: [],
+        projects: registeredProject
+          ? [
+              {
+                sourceId: "desktop-test",
+                name: registeredProject.name,
+                rootPaths: [registeredProject.rootPath],
+                order: 0,
+                assignedThreadIds: [],
+              },
+            ]
+          : [],
         sourcePath: path.join(root, ".codex-global-state.json"),
         usedBackup: false,
       })),
@@ -1153,12 +1168,26 @@ describe("Bridge vertical slice", () => {
         { projectName: "test_codex" },
       );
 
-      await vi.waitFor(() => expect(database.getProject("test_codex")).toBeDefined());
-      const project = database.getProject("test_codex");
+      await vi.waitFor(() =>
+        expect(database.listProjects().some((project) => project.name === "test_codex")).toBe(true),
+      );
+      const project = database.listProjects().find((candidate) => candidate.name === "test_codex");
+      expect(project?.id).toMatch(/^mobile-[0-9a-f]{16}$/);
       expect(project?.name).toBe("test_codex");
       expect(path.basename(project?.rootPath ?? "")).toBe("test_codex");
       expect(existsSync(path.join(root, "test_codex"))).toBe(true);
       expect(registerProject).toHaveBeenCalledWith({
+        name: "test_codex",
+        rootPath: project?.rootPath,
+      });
+
+      const callsBeforeOverwrite = registerProject.mock.calls.length;
+      registeredProject = undefined;
+      await channel.receive("/project list", "desktop-overwrote-project-state");
+      await vi.waitFor(() =>
+        expect(registerProject.mock.calls.length).toBeGreaterThan(callsBeforeOverwrite),
+      );
+      expect(registeredProject).toEqual({
         name: "test_codex",
         rootPath: project?.rootPath,
       });

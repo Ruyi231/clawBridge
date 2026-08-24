@@ -15,7 +15,7 @@ ClawBridge 当前按“单一可信操作者、Codex Desktop 项目或受控手�
 
 - `projects.yaml` 是启动时导入的 bootstrap，不再是唯一项目来源；已登记项目和运行期变更保存在 SQLite
 - 当 `codexDesktopProjects.enabled: true` 时，Codex Desktop `project-order` 中当前可见的所有本地项目自动成为可信项目，不再逐项目二次授权
-- `codexDesktopProjects.registerCreatedProjects` 默认关闭；显式开启后，仅把飞书成功新建且受 `allowedRoots` 约束的项目追加到当前 Windows 用户的 Desktop 状态。写入前检查并发变化，无法安全登记时保留本地项目并记录警告，不覆盖并发状态
+- `codexDesktopProjects.registerCreatedProjects` 默认关闭；显式开启后，仅把飞书成功新建且受 `allowedRoots` 约束、内部 ID 为 `mobile-*` 的项目追加到当前 Windows 用户的 Desktop 状态。Bridge 每 5 秒复核一次，以修复 Desktop 退出时用旧内存覆盖的条目；写入前检查并发变化，无法安全登记时保留本地项目并记录警告，不覆盖并发状态
 - Desktop 项目按内部 source ID 和规范化真实主目录同步；同路径静态项目会复用，移出 Desktop 可见列表的自动项目只停用、不删除历史
 - Desktop 主状态读取或严格解析失败时 fail-closed；`.bak` 不作为执行授权源，缓存的自动项目暂时停用，主状态恢复后再自动启用
 - Desktop 多目录项目目前只使用第一个 `rootPaths` 作为主 `cwd`，并明确提示其余目录未纳入当前 App Server 工作目录
