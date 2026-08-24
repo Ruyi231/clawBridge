@@ -42,15 +42,32 @@ ClawBridge 使用官方 SDK 的长连接，不需要公网 URL。
 
 ## 4. 取得当前用户 Open ID
 
-若已安装并授权飞书 CLI，可以使用：
+Open ID 必须是实际操作者在**当前飞书应用**下的用户标识，格式为 `ou_...`。不要填写机器人的 Open ID、用户 ID 或 Union ID，也不要照抄其他应用查询出的值。
+
+### 4.1 已安装飞书 CLI
+
+在准备运行 ClawBridge 的同一 Windows 用户下执行：
 
 ```powershell
-lark-cli auth status
+lark-cli auth status --json
 ```
 
-输出中 `identities.user.openId` 就是当前绑定应用下的用户 Open ID。也可以先把管理器中的 Open ID 设为 `ou_pending_pairing`，启动后向机器人发送一条单聊消息，再根据 Bridge 返回的配对提示填写实际 `ou_...`。
+复制输出中 `identities.user.openId` 的 `ou_...` 值，并确认输出中的 App ID 与管理器中填写的 App ID 相同。若 CLI 尚未登录或绑定的不是这个应用，先按 CLI 提示完成授权，再重新查询。
 
 飞书 CLI 能确认当前绑定的 App ID、用户 Open ID和已授权 scope，也能核对事件/API schema；它不能替代开发者后台完成机器人能力开关、长连接订阅或应用版本发布。
+
+### 4.2 没有飞书 CLI
+
+ClawBridge 内置一次性人工配对流程，不需要安装 CLI：
+
+1. 在管理器的 Open ID 输入框中填写固定占位符 `ou_pending_pairing`。
+2. 点击“保存并应用”，等管理器显示长连接已就绪。
+3. 在飞书中打开该机器人的**单聊**，发送“绑定”或任意一条文本消息；不要在群聊中操作。
+4. 机器人会回复发送者的实际 Open ID。配对模式只返回标识，不会执行消息中的 Codex 任务。
+5. 复制回复中的 `ou_...`，替换管理器里的占位符，再次点击“保存并应用”。
+6. 向机器人单聊发送“菜单”。只有绑定用户能够得到正常控制卡，其他用户和群消息都会被拒绝。
+
+建议先把应用可用范围限制为本人，再进行配对。`ou_pending_pairing` 只应用于首次发现 Open ID，不应作为日常运行配置保留。
 
 ## 5. 发布后验证
 

@@ -387,7 +387,7 @@ describe("Bridge vertical slice", () => {
     return visit(message.card);
   }
 
-  it("prints a local pairing candidate without authorizing it", async () => {
+  it("returns a pairing candidate without authorizing Codex execution", async () => {
     const channel = new FakeChannel();
     const codex = fakeCodex();
     const logger = pino({ level: "silent" });
@@ -411,7 +411,12 @@ describe("Bridge vertical slice", () => {
       expect.stringContaining("CLAWBRIDGE_FEISHU_ALLOWED_OPEN_ID"),
     );
     expect(codex.runTurn).not.toHaveBeenCalled();
-    expect(channel.sent).toHaveLength(0);
+    expect(channel.sent).toEqual([
+      expect.objectContaining({
+        chatId: "chat-owner",
+        text: expect.stringContaining("owner"),
+      }),
+    ]);
   });
 
   it("routes command approval to a one-time card and resumes the task", async () => {

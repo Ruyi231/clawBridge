@@ -188,6 +188,15 @@ export class Bridge {
           { pairingCandidateOpenId: event.senderOpenId },
           "Pairing required: copy this Open ID into CLAWBRIDGE_FEISHU_ALLOWED_OPEN_ID and restart",
         );
+        await this.dependencies.channel.send({
+          chatId: event.chatId,
+          text: [
+            "ClawBridge 配对模式",
+            `你的 Open ID：${event.senderOpenId}`,
+            "请把该值填写到 ClawBridge 管理器的 Open ID 输入框，然后点击“保存并应用”。",
+            "在完成绑定前，Bridge 不会执行任何 Codex 任务。",
+          ].join("\n"),
+        });
         return;
       }
       if (!("text" in event)) {

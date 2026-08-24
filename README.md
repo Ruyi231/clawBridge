@@ -2,7 +2,7 @@
 
 ClawBridge 是一个运行在 Windows 本机的单用户控制桥：它通过飞书长连接接收手机消息，将任务送入本机 Codex App Server，再把结果发回飞书。电脑无需开放公网端口。
 
-当前版本为 **ClawBridge 2.3.0**。仓库已完成 Phase 0–2 以及 ClawBridge 2.0-A/B/C/D/E 的本地实现：除原有单聊控制台、项目/对话管理和持久队列外，还增加了项目群/对话话题隔离、任务中心、CardKit 流式任务卡、卡片新建项目、按对话保存模型与推理强度、命令/文件审批和 Codex 提问卡片，以及图片与受限文档附件输入。2.3.0 清除了示例配置中的发布者盘符依赖，增加跨用户项目路径诊断、迁移指南、飞书后台完整清单和 Windows GitHub CI。
+当前版本为 **ClawBridge 2.3.1**。仓库已完成 Phase 0–2 以及 ClawBridge 2.0-A/B/C/D/E 的本地实现：除原有单聊控制台、项目/对话管理和持久队列外，还增加了项目群/对话话题隔离、任务中心、CardKit 流式任务卡、卡片新建项目、按对话保存模型与推理强度、命令/文件审批和 Codex 提问卡片，以及图片与受限文档附件输入。2.3.1 增加无控制台管理器入口和可直接完成的 Open ID 配对流程；2.3.0 清除了示例配置中的发布者盘符依赖，增加跨用户项目路径诊断、迁移指南、飞书后台完整清单和 Windows GitHub CI。
 
 ## 环境要求
 
@@ -21,7 +21,7 @@ Set-Location clawBridge
 
 安装脚本会生成未跟踪的 `config/local.yaml`、`config/projects.yaml`，安装锁定依赖并构建。示例 bootstrap 项目使用相对路径 `.`，所以无论仓库克隆到哪个盘符，都指向当前 ClawBridge 目录。真实凭据、本机 YAML、SQLite 和日志均被 `.gitignore` 排除。
 
-接着双击 `ClawBridge Manager.cmd` 保存三项飞书凭据并启动。完整的新电脑安装、旧实例状态迁移和项目路径规则见 [安装与迁移](docs/MIGRATION.md)，飞书开发者后台逐项配置见 [飞书开放平台配置清单](docs/FEISHU_SETUP.md)。
+接着双击无控制台窗口的 `ClawBridge Manager.vbs` 保存三项飞书凭据并启动；`ClawBridge Manager.cmd` 作为兼容入口也会立即转交给该隐藏启动器。完整的新电脑安装、旧实例状态迁移和项目路径规则见 [安装与迁移](docs/MIGRATION.md)，飞书开发者后台逐项配置和两种 Open ID 获取方法见 [飞书开放平台配置清单](docs/FEISHU_SETUP.md)。
 
 `config/projects.yaml` 可保留少量静态 bootstrap 项目。若希望飞书端直接复用当前 Windows 用户 Codex Desktop 左栏中的本地项目，保留自动同步；不要把真实密钥写入 YAML 或提交到 Git。
 
@@ -56,11 +56,13 @@ npm run doctor:projects
 
 ### ClawBridge 管理器（推荐）
 
-构建完成后，直接双击仓库根目录的 `ClawBridge Manager.cmd`。管理器提供三个输入框：
+构建完成后，直接双击仓库根目录的 `ClawBridge Manager.vbs`。这是推荐入口，只显示 WinForms 管理器，不保留 CMD/PowerShell 控制台窗口；旧的 `ClawBridge Manager.cmd` 会转交给同一隐藏入口，但 Windows 在启动 `.cmd` 时仍可能短暂闪过一个控制台。管理器提供三个输入框：
 
 - `App ID`：飞书开放平台“凭证与基础信息”中的 `cli_...`
 - `App Secret`：同一页面中的应用密钥，输入框不会回显
 - `Open ID`：唯一允许控制机器人的飞书用户 `ou_...`
+
+Open ID 输入框旁的“如何获取？”包含两种流程：已安装飞书 CLI 时运行 `lark-cli auth status --json` 并读取 `identities.user.openId`；没有 CLI 时先填 `ou_pending_pairing`，启动后单聊机器人，再把机器人回复的 `ou_...` 写回管理器。完整步骤与安全注意事项见 [飞书开放平台配置清单](docs/FEISHU_SETUP.md#4-取得当前用户-open-id)。
 
 第一次填写后点击“保存并应用”。三项凭据会使用 Windows 当前用户的 DPAPI 加密，保存到 `%LOCALAPPDATA%\ClawBridge\credentials.json`；不会写入仓库、YAML、命令行参数或 PowerShell 历史。以后直接在管理器中启动、停止、重启或“构建并重启”，无需再次输入，也无需使用 `npm start`。
 

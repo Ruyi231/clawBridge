@@ -8,7 +8,7 @@ Set-Location clawBridge
 .\scripts\install.ps1
 ```
 
-安装脚本会从示例生成未跟踪的 `config/local.yaml` 和 `config/projects.yaml`，执行 `npm ci` 并构建。随后双击 `ClawBridge Manager.cmd`，为这台电脑重新填写 App ID、App Secret 和当前操作者 Open ID。
+安装脚本会从示例生成未跟踪的 `config/local.yaml` 和 `config/projects.yaml`，执行 `npm ci` 并构建。随后双击无控制台窗口的 `ClawBridge Manager.vbs`，为这台电脑重新填写 App ID、App Secret 和当前操作者 Open ID；`.cmd` 仅作为兼容入口。Open ID 的 CLI 查询和无 CLI 配对流程见 [飞书开放平台配置清单](FEISHU_SETUP.md#4-取得当前用户-open-id)。
 
 不会进入 Git 的本机状态包括：
 

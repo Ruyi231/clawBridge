@@ -151,6 +151,7 @@ exit `$exitCode
   $startInfo.WorkingDirectory = $script:projectRoot
   $startInfo.UseShellExecute = $false
   $startInfo.CreateNoWindow = $true
+  $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
   $startInfo.RedirectStandardOutput = $false
   $startInfo.RedirectStandardError = $false
 
@@ -1060,9 +1061,39 @@ $script:secretBox.Add_Leave({
 
 $script:openIdBox = New-Object System.Windows.Forms.TextBox
 $script:openIdBox.Location = New-Object Drawing.Point(115, 106)
-$script:openIdBox.Size = New-Object Drawing.Size(568, 25)
+$script:openIdBox.Size = New-Object Drawing.Size(448, 25)
 $script:openIdBox.Anchor = "Top,Left,Right"
 $credentialsGroup.Controls.Add($script:openIdBox)
+
+$openIdHelpButton = New-Object System.Windows.Forms.Button
+$openIdHelpButton.Text = "如何获取？"
+$openIdHelpButton.Location = New-Object Drawing.Point(573, 104)
+$openIdHelpButton.Size = New-Object Drawing.Size(110, 28)
+$openIdHelpButton.Anchor = "Top,Right"
+$openIdHelpButton.Add_Click({
+    $message = @"
+有飞书 CLI：
+1. 打开 PowerShell，执行 lark-cli auth status --json
+2. 复制 identities.user.openId 的 ou_... 值
+3. 确认输出中的 App ID 与本窗口一致
+
+没有飞书 CLI：
+1. 在 Open ID 中填写 ou_pending_pairing，点击“保存并应用”
+2. 在飞书中单聊该机器人，发送“绑定”
+3. 机器人会回复当前用户的 ou_... Open ID；配对模式不会执行任务
+4. 把回复值替换进本窗口，再点“保存并应用”
+
+Open ID 只对当前飞书应用有效；更换 App ID 后需要重新获取。
+"@
+    [System.Windows.Forms.MessageBox]::Show(
+      $script:form,
+      $message.Trim(),
+      "如何获取 Open ID",
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
+  })
+$credentialsGroup.Controls.Add($openIdHelpButton)
 
 $script:credentialHint = New-Object System.Windows.Forms.Label
 $script:credentialHint.Text = "凭据使用 Windows 当前用户加密保存；软件不会回显 App Secret。"
