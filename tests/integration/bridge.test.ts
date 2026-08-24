@@ -1108,17 +1108,19 @@ describe("Bridge vertical slice", () => {
     ).toBeUndefined();
   });
 
-  it("creates a mobile project in a matching directory and registers it with Desktop", async () => {
+  it("registers mobile projects only while Desktop is closed and honors Desktop removal", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "clawbridge-mobile-project-"));
     const channel = new FakeChannel();
     const database = new BridgeDatabase(":memory:");
     let registeredProject: { name: string; rootPath: string } | undefined;
+    let desktopRunning = true;
     const registerProject = vi.fn(async (input: { name: string; rootPath: string }) => {
       const created = !registeredProject;
       registeredProject = input;
       return { sourceId: "desktop-test", created };
     });
     const desktopProjects: DesktopProjectSource = {
+      isDesktopRunning: vi.fn(async () => desktopRunning),
       listProjects: vi.fn(async () => ({
         projects: registeredProject
           ? [
@@ -1176,21 +1178,39 @@ describe("Bridge vertical slice", () => {
       expect(project?.name).toBe("test_codex");
       expect(path.basename(project?.rootPath ?? "")).toBe("test_codex");
       expect(existsSync(path.join(root, "test_codex"))).toBe(true);
+      expect(registerProject).not.toHaveBeenCalled();
+      expect(database.getDesktopProjectSync(project!.id)).toMatchObject({ state: "pending" });
+
+      desktopRunning = false;
+      await channel.receive("/project list", "desktop-closed-register-project");
+      await vi.waitFor(() => expect(registerProject).toHaveBeenCalledTimes(1));
       expect(registerProject).toHaveBeenCalledWith({
         name: "test_codex",
         rootPath: project?.rootPath,
       });
-
-      const callsBeforeOverwrite = registerProject.mock.calls.length;
-      registeredProject = undefined;
-      await channel.receive("/project list", "desktop-overwrote-project-state");
-      await vi.waitFor(() =>
-        expect(registerProject.mock.calls.length).toBeGreaterThan(callsBeforeOverwrite),
-      );
-      expect(registeredProject).toEqual({
-        name: "test_codex",
-        rootPath: project?.rootPath,
+      expect(database.getDesktopProjectSync(project!.id)).toMatchObject({
+        state: "pending",
+        sourceId: "desktop-test",
       });
+
+      desktopRunning = true;
+      await channel.receive("/project list", "desktop-observed-project");
+      await vi.waitFor(() =>
+        expect(database.getDesktopProjectSync(project!.id)?.state).toBe("synced"),
+      );
+
+      registeredProject = undefined;
+      await channel.receive("/project list", "desktop-removed-project");
+      await vi.waitFor(() =>
+        expect(database.getDesktopProjectSync(project!.id)?.state).toBe("removed"),
+      );
+      expect(database.getProject(project!.id)?.enabled).toBe(false);
+      expect(registerProject).toHaveBeenCalledTimes(1);
+
+      registeredProject = { name: "test_codex", rootPath: project!.rootPath };
+      await channel.receive("/project list", "desktop-restored-project");
+      await vi.waitFor(() => expect(database.getProject(project!.id)?.enabled).toBe(true));
+      expect(database.getDesktopProjectSync(project!.id)?.state).toBe("synced");
     } finally {
       await bridge.stop();
       bridge = undefined;

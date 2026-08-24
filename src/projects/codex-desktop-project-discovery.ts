@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -19,6 +20,7 @@ export interface DesktopProjectSnapshot {
 
 export interface DesktopProjectSource {
   listProjects(): Promise<DesktopProjectSnapshot>;
+  isDesktopRunning?(): Promise<boolean>;
   registerProject?(input: { name: string; rootPath: string }): Promise<{
     sourceId: string;
     created: boolean;
@@ -151,6 +153,28 @@ export class CodexDesktopProjectDiscovery implements DesktopProjectSource {
         throw new Error("Unable to read Codex Desktop project state or its backup.");
       }
     }
+  }
+
+  async isDesktopRunning(): Promise<boolean> {
+    if (process.platform !== "win32") return true;
+    const script = [
+      "$match = Get-Process -Name ChatGPT -ErrorAction SilentlyContinue",
+      "| Where-Object { $_.Path -match '[\\\\/]OpenAI\\.Codex_[^\\\\/]*[\\\\/]app[\\\\/]ChatGPT\\.exe$' }",
+      "| Select-Object -First 1",
+      "; if ($null -eq $match) { 'false' } else { 'true' }",
+    ].join(" ");
+    const output = await new Promise<string>((resolve, reject) => {
+      execFile(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", script],
+        { windowsHide: true, timeout: 4_000, encoding: "utf8" },
+        (error, stdout) => {
+          if (error) reject(error);
+          else resolve(stdout);
+        },
+      );
+    });
+    return output.trim().toLowerCase() === "true";
   }
 
   async registerProject(input: { name: string; rootPath: string }): Promise<{

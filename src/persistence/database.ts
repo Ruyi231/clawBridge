@@ -25,6 +25,13 @@ CREATE TABLE IF NOT EXISTS projects (
   enabled INTEGER NOT NULL CHECK(enabled IN (0, 1))
 );
 
+CREATE TABLE IF NOT EXISTS desktop_project_sync (
+  project_id TEXT PRIMARY KEY REFERENCES projects(project_id) ON DELETE CASCADE,
+  source_id TEXT,
+  state TEXT NOT NULL CHECK(state IN ('pending', 'synced', 'removed')),
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS project_numbers (
   project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
   local_number INTEGER NOT NULL UNIQUE
@@ -176,6 +183,15 @@ export interface ProjectRecord {
   enabled: boolean;
 }
 
+export type DesktopProjectSyncState = "pending" | "synced" | "removed";
+
+export interface DesktopProjectSyncRecord {
+  projectId: string;
+  sourceId: string | null;
+  state: DesktopProjectSyncState;
+  updatedAt: string;
+}
+
 export interface ProjectChatStateRecord {
   chatId: string;
   projectId: string;
@@ -236,6 +252,13 @@ interface ProjectRow {
   name: string;
   root_path: string;
   enabled: number;
+}
+
+interface DesktopProjectSyncRow {
+  project_id: string;
+  source_id: string | null;
+  state: DesktopProjectSyncState;
+  updated_at: string;
 }
 
 interface ProjectChatStateRow {
@@ -472,6 +495,7 @@ export class BridgeDatabase {
     this.migrateThreadExecutionSettings();
     this.migrateTaskAttachments();
     this.migratePendingFeishuTopics();
+    this.migrateDesktopProjectSync();
   }
 
   close(): void {
@@ -741,6 +765,58 @@ export class BridgeDatabase {
       .prepare("UPDATE projects SET enabled = ? WHERE project_id = ?")
       .run(enabled ? 1 : 0, projectId);
     return result.changes === 0 ? undefined : this.getProject(projectId);
+  }
+
+  ensureDesktopProjectSync(
+    projectId: string,
+    initialState: DesktopProjectSyncState = "pending",
+  ): DesktopProjectSyncRecord {
+    const now = new Date().toISOString();
+    this.database
+      .prepare(
+        `INSERT OR IGNORE INTO desktop_project_sync(project_id, source_id, state, updated_at)
+         VALUES(?, NULL, ?, ?)`,
+      )
+      .run(projectId, initialState, now);
+    const record = this.getDesktopProjectSync(projectId);
+    if (!record) throw new Error(`Failed to persist Desktop sync state for "${projectId}"`);
+    return record;
+  }
+
+  setDesktopProjectSync(
+    projectId: string,
+    state: DesktopProjectSyncState,
+    sourceId?: string | null,
+  ): DesktopProjectSyncRecord {
+    const now = new Date().toISOString();
+    this.database
+      .prepare(
+        `INSERT INTO desktop_project_sync(project_id, source_id, state, updated_at)
+         VALUES(?, ?, ?, ?)
+         ON CONFLICT(project_id) DO UPDATE SET
+           source_id=CASE WHEN excluded.source_id IS NULL THEN desktop_project_sync.source_id ELSE excluded.source_id END,
+           state=excluded.state,
+           updated_at=excluded.updated_at`,
+      )
+      .run(projectId, sourceId ?? null, state, now);
+    const record = this.getDesktopProjectSync(projectId);
+    if (!record) throw new Error(`Failed to update Desktop sync state for "${projectId}"`);
+    return record;
+  }
+
+  getDesktopProjectSync(projectId: string): DesktopProjectSyncRecord | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM desktop_project_sync WHERE project_id = ?")
+      .get(projectId) as DesktopProjectSyncRow | undefined;
+    return row ? toDesktopProjectSync(row) : undefined;
+  }
+
+  listDesktopProjectSync(): DesktopProjectSyncRecord[] {
+    return (
+      this.database
+        .prepare("SELECT * FROM desktop_project_sync ORDER BY project_id")
+        .all() as DesktopProjectSyncRow[]
+    ).map(toDesktopProjectSync);
   }
 
   selectProject(chatId: string, projectId: string): { projectId: string; threadId: string | null } {
@@ -2101,4 +2177,34 @@ export class BridgeDatabase {
       .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(11, ?)")
       .run(new Date().toISOString());
   }
+
+  private migrateDesktopProjectSync(): void {
+    const applied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 12")
+      .get();
+    if (applied) return;
+    const now = new Date().toISOString();
+    this.database.transaction(() => {
+      // Releases before v2.5 continuously re-registered every mobile project. Treat those
+      // existing rows as already synchronized so a Desktop-side removal becomes authoritative.
+      this.database
+        .prepare(
+          `INSERT OR IGNORE INTO desktop_project_sync(project_id, source_id, state, updated_at)
+           SELECT project_id, NULL, 'synced', ? FROM projects WHERE project_id LIKE 'mobile-%'`,
+        )
+        .run(now);
+      this.database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(12, ?)")
+        .run(now);
+    })();
+  }
+}
+
+function toDesktopProjectSync(row: DesktopProjectSyncRow): DesktopProjectSyncRecord {
+  return {
+    projectId: row.project_id,
+    sourceId: row.source_id,
+    state: row.state,
+    updatedAt: row.updated_at,
+  };
 }

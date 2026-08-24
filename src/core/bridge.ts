@@ -2191,20 +2191,8 @@ export class Bridge {
   private async registerCreatedDesktopProject(project: ProjectRecord): Promise<void> {
     const register = this.dependencies.desktopProjects?.registerProject;
     if (!register) return;
-    try {
-      await register.call(this.dependencies.desktopProjects, {
-        name: project.name,
-        rootPath: project.rootPath,
-      });
-      await this.refreshDesktopProjects();
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      this.desktopSyncWarning = `项目目录已创建，但 Codex Desktop 登记失败：${detail}`;
-      this.dependencies.logger.warn(
-        { err: error, projectId: project.id },
-        "Failed to register a created project in Codex Desktop",
-      );
-    }
+    this.dependencies.database.setDesktopProjectSync(project.id, "pending");
+    await this.refreshDesktopProjects();
   }
 
   private async runChatCommand(
@@ -2845,21 +2833,12 @@ export class Bridge {
   private async refreshDesktopProjectsOnce(source: DesktopProjectSource): Promise<void> {
     try {
       const registrationWarnings: string[] = [];
-      if (
-        source.registerProject &&
-        this.dependencies.config.projectManagement.codexDesktopProjects.registerCreatedProjects
-      ) {
-        const managedProjects = this.dependencies.database
-          .listProjects({ includeDisabled: false })
-          .filter((project) => project.id.startsWith("mobile-"));
-        for (const project of managedProjects) {
-          try {
-            await source.registerProject({ name: project.name, rootPath: project.rootPath });
-          } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            registrationWarnings.push(`${project.name} 无法登记到 Codex Desktop（${detail}）`);
-          }
-        }
+      let desktopRunning: boolean | undefined;
+      try {
+        desktopRunning = source.isDesktopRunning ? await source.isDesktopRunning() : true;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        registrationWarnings.push(`无法确认 Codex Desktop 运行状态（${detail}）`);
       }
       const snapshot = await source.listProjects();
       if (snapshot.usedBackup) {
@@ -2903,10 +2882,20 @@ export class Bridge {
       }
 
       const records = this.dependencies.database.syncDesktopProjects(registrations);
-      this.desktopProjectOrder = records.map((record) => record.id);
-      for (const record of records) this.ensureProjectNumber(record.id);
+      await this.reconcileManagedDesktopProjects(
+        source,
+        registrations,
+        desktopRunning,
+        registrationWarnings,
+      );
+      const activeRecords = records.flatMap((record) => {
+        const persisted = this.dependencies.database.getProject(record.id);
+        return persisted?.enabled ? [persisted] : [];
+      });
+      this.desktopProjectOrder = activeRecords.map((record) => record.id);
+      for (const record of activeRecords) this.ensureProjectNumber(record.id);
       this.desktopProjectIds.clear();
-      for (const record of records) this.desktopProjectIds.add(record.id);
+      for (const record of activeRecords) this.desktopProjectIds.add(record.id);
       this.desktopThreadProjects.clear();
       for (const [threadId, projectId] of assignedThreads) {
         if (this.desktopProjectIds.has(projectId))
@@ -2915,7 +2904,7 @@ export class Bridge {
       const allWarnings = [...registrationWarnings, ...warnings];
       this.desktopSyncWarning = allWarnings.length > 0 ? allWarnings.join("；") : undefined;
       const signature = JSON.stringify({
-        records: records.map((record) => [record.id, record.name, record.rootPath]),
+        records: activeRecords.map((record) => [record.id, record.name, record.rootPath]),
         warning: this.desktopSyncWarning ?? null,
       });
       if (signature !== this.desktopSnapshotSignature) {
@@ -2923,7 +2912,7 @@ export class Bridge {
         this.dependencies.logger.info(
           {
             discovered: snapshot.projects.length,
-            synchronized: records.length,
+            synchronized: activeRecords.length,
             usedBackup: snapshot.usedBackup,
           },
           "Synchronized Codex Desktop projects",
@@ -2934,6 +2923,84 @@ export class Bridge {
       this.revokeDesktopProjectSnapshot(`Codex Desktop 项目同步失败：${detail}`);
       this.dependencies.logger.warn({ err: error }, "Failed to synchronize Codex Desktop projects");
     }
+  }
+
+  private async reconcileManagedDesktopProjects(
+    source: DesktopProjectSource,
+    registrations: Array<{ sourceId: string; name: string; rootPath: string }>,
+    desktopRunning: boolean | undefined,
+    warnings: string[],
+  ): Promise<void> {
+    const { database } = this.dependencies;
+    const registrationEnabled =
+      Boolean(source.registerProject) &&
+      this.dependencies.config.projectManagement.codexDesktopProjects.registerCreatedProjects;
+    const mobileProjects = database
+      .listProjects({ includeDisabled: true })
+      .filter((project) => project.id.startsWith("mobile-"));
+
+    for (const project of mobileProjects) {
+      const sync = database.ensureDesktopProjectSync(project.id, "synced");
+      const desktopProject = registrations.find((candidate) =>
+        this.sameDesktopRoot(candidate.rootPath, project.rootPath),
+      );
+
+      if (desktopProject) {
+        if (sync.state === "pending" && desktopRunning === true) {
+          database.setDesktopProjectSync(project.id, "synced", desktopProject.sourceId);
+          database.setProjectEnabled(project.id, true);
+        } else if (sync.state === "removed") {
+          if (desktopRunning === true) {
+            database.setDesktopProjectSync(project.id, "synced", desktopProject.sourceId);
+            database.setProjectEnabled(project.id, true);
+          } else {
+            // A stale state file seen while Desktop is closed is not proof of an explicit re-add.
+            database.setProjectEnabled(project.id, false);
+          }
+        } else if (sync.state === "synced") {
+          database.setDesktopProjectSync(project.id, "synced", desktopProject.sourceId);
+        }
+        continue;
+      }
+
+      if (sync.state === "synced" && desktopRunning === true) {
+        database.setDesktopProjectSync(project.id, "removed");
+        database.setProjectEnabled(project.id, false);
+        this.dependencies.logger.info(
+          { projectId: project.id },
+          "Disabled mobile project removed from Codex Desktop",
+        );
+        continue;
+      }
+      if (sync.state === "removed") {
+        database.setProjectEnabled(project.id, false);
+        continue;
+      }
+      if (sync.state !== "pending" || desktopRunning !== false || !registrationEnabled) continue;
+
+      try {
+        const result = await source.registerProject!({
+          name: project.name,
+          rootPath: project.rootPath,
+        });
+        database.setDesktopProjectSync(project.id, "pending", result.sourceId);
+        this.dependencies.logger.info(
+          { projectId: project.id, desktopSourceId: result.sourceId },
+          "Registered pending mobile project while Codex Desktop was closed",
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        warnings.push(`${project.name} 无法登记到 Codex Desktop（${detail}）`);
+      }
+    }
+  }
+
+  private sameDesktopRoot(left: string, right: string): boolean {
+    const normalize = (candidate: string) => {
+      const resolved = path.resolve(candidate).replace(/[\\/]+$/, "");
+      return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    };
+    return normalize(left) === normalize(right);
   }
 
   private revokeDesktopProjectSnapshot(warning: string): void {

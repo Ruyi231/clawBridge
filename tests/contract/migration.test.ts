@@ -352,4 +352,44 @@ describe("SQLite migration contract", () => {
       rmSync(temporaryDirectory, { recursive: true, force: true });
     }
   });
+
+  it("migrates existing mobile projects to synchronized Desktop lifecycle state", () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-desktop-sync-"));
+    const databasePath = path.join(temporaryDirectory, "bridge.db");
+    let bridgeDatabase: BridgeDatabase | undefined;
+    try {
+      const legacy = new Database(databasePath);
+      legacy.exec(`
+        CREATE TABLE projects (
+          project_id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL, enabled INTEGER NOT NULL
+        );
+        INSERT INTO projects VALUES
+          ('mobile-oldproject', 'Mobile', 'D:/mobile', 1),
+          ('desktop@local', 'Desktop', 'D:/desktop', 1);
+      `);
+      legacy.close();
+
+      bridgeDatabase = new BridgeDatabase(databasePath);
+      expect(bridgeDatabase.getDesktopProjectSync("mobile-oldproject")).toMatchObject({
+        projectId: "mobile-oldproject",
+        sourceId: null,
+        state: "synced",
+      });
+      expect(bridgeDatabase.getDesktopProjectSync("desktop@local")).toBeUndefined();
+      expect(bridgeDatabase.setDesktopProjectSync("mobile-oldproject", "removed")).toMatchObject({
+        state: "removed",
+      });
+
+      bridgeDatabase.close();
+      bridgeDatabase = undefined;
+      const migrated = new Database(databasePath, { readonly: true });
+      expect(
+        migrated.prepare("SELECT version FROM schema_migrations WHERE version=12").get(),
+      ).toEqual({ version: 12 });
+      migrated.close();
+    } finally {
+      bridgeDatabase?.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
 });

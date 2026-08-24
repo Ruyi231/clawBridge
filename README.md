@@ -2,7 +2,7 @@
 
 ClawBridge 是一个运行在 Windows 本机的单用户控制桥：它通过飞书长连接接收手机消息，将任务送入本机 Codex App Server，再把结果发回飞书。电脑无需开放公网端口。
 
-当前版本为 **ClawBridge 2.4.1**。仓库已完成 Phase 0–2 以及 ClawBridge 2.0-A/B/C/D/E 的本地实现：除原有单聊控制台、项目/对话管理和持久队列外，还增加了项目群/对话话题隔离、任务中心、CardKit 流式任务卡、卡片新建项目、按对话保存模型与推理强度、命令/文件审批和 Codex 提问卡片，以及图片与受限文档附件输入。2.4.1 会持续修复被已打开 Desktop 覆盖的飞书项目登记；2.4.0 让飞书表单新建项目使用同名本地目录，并可显式选择把该项目登记到当前 Windows 用户的 Codex Desktop 项目列表；2.3.3 固定跨平台检出的 JSON 换行；2.3.2 修复 Windows 8.3 路径断言；2.3.1 增加无控制台管理器入口和 Open ID 配对流程；2.3.0 完成跨用户可迁移发布准备。
+当前版本为 **ClawBridge 2.5.0**。仓库已完成 Phase 0–2 以及 ClawBridge 2.0-A/B/C/D/E 的本地实现：除原有单聊控制台、项目/对话管理和持久队列外，还增加了项目群/对话话题隔离、任务中心、CardKit 流式任务卡、卡片新建项目、按对话保存模型与推理强度、命令/文件审批和 Codex 提问卡片，以及图片与受限文档附件输入。2.5.0 改为由 Codex Desktop 决定飞书项目的启用生命周期：Bridge 只在 Desktop 完全关闭后登记新项目，Desktop 中移除项目会自动在飞书停用，重新加入同一目录则恢复；全程不提供飞书删除入口，也不删除目录、对话或项目群。2.4.1 修复 Desktop 覆盖飞书项目登记；2.4.0 让飞书表单新建项目使用同名本地目录。
 
 ## 环境要求
 
@@ -42,7 +42,7 @@ projectManagement:
 - `allowCreateDirectory`：是否允许 `/project create` 新建目录；不需要此能力时保持 `false`。
 - `allowRegisterExisting`：是否允许 `/project import` 登记已有目录；不需要此能力时保持 `false`。
 - `codexDesktopProjects.enabled`：启用后，读取**当前 Windows 用户**的 Codex Desktop 本地项目状态，把其当前可见项目按原顺序自动登记为可执行项目，不会继承仓库发布者的项目。
-- `codexDesktopProjects.registerCreatedProjects`：显式开启后，飞书表单新建成功的项目会原子登记到当前用户的 Desktop 状态；不会使用发布者路径。Bridge 会持续检查带 `mobile-*` 内部标记的飞书项目，Desktop 用旧内存覆盖状态后也会自动补回。已经打开的 Desktop 仍需要完全退出，等待 Bridge 补写后再启动，才能刷新侧栏。该开关默认关闭，示例配置为方便飞书新建项目而明确开启。
+- `codexDesktopProjects.registerCreatedProjects`：显式开启后，飞书表单新建成功的项目进入 `pending` 状态；Bridge 检测到 Codex Desktop 完全关闭后才原子登记到当前 Windows 用户的 Desktop 状态。下次 Desktop 启动并看到该目录后转为 `synced`。以后从 Desktop 左栏移除会转为 `removed` 并在飞书自动停用；在 Desktop 重新加入同一目录即可恢复。Bridge 不会反复补回已移除项目。该开关默认关闭，示例配置为方便飞书新建项目而明确开启。
 - `codexDesktopProjects.stateFile`：可选覆盖 Desktop 状态文件路径；未配置时使用 `CODEX_HOME/.codex-global-state.json`，否则使用当前用户的 `~/.codex/.codex-global-state.json`。
 
 路径既可以写成 Windows 正斜杠形式（如 `D:/Work`），也可以使用 YAML 中正确转义的反斜杠。建议只配置专门存放代码的窄范围目录，不要配置磁盘根目录或用户主目录。
@@ -120,7 +120,7 @@ Open ID 输入框旁的“如何获取？”包含两种流程：已安装飞书
 
 单聊控制台提供“剩余额度”按钮。它通过 Codex App Server 的 `account/rateLimits/read` 读取当前主窗口、次窗口和可用的月度限额百分比及重置时间；不会读取或显示 App Secret、登录令牌等凭据。额度卡可直接刷新，并可返回控制台。
 
-项目列表中的“新建项目”会打开飞书表单。填写项目名称并提交后，Bridge 会在 `allowedRoots` 的首个目录下创建一个**同名**、受路径策略约束的新目录，自动登记、选择项目并创建项目群；例如 `test_codex` 会创建为 `<首个 allowedRoot>/test_codex`，不再落到 `mobile-时间戳` 目录。内部仍使用不可见的 `mobile-*` ID，以便 Bridge 跨重启识别并维护 Desktop 登记。需要 `allowCreateDirectory: true`。同时启用 `codexDesktopProjects.enabled` 和 `registerCreatedProjects` 时，Bridge 还会把它登记到当前 Windows 用户的 Codex Desktop 项目状态；若 Desktop 当时已经打开，请完全退出 Desktop、等待至少 5 秒让 Bridge 补写，再重新启动。表单能力要求飞书客户端支持输入框和 `form_submit`。
+项目列表中的“新建项目”会打开飞书表单。填写项目名称并提交后，Bridge 会在 `allowedRoots` 的首个目录下创建一个**同名**、受路径策略约束的新目录，自动登记、选择项目并创建项目群；例如 `test_codex` 会创建为 `<首个 allowedRoot>/test_codex`，不再落到 `mobile-时间戳` 目录。内部仍使用不可见的 `mobile-*` ID。需要 `allowCreateDirectory: true`。同时启用 `codexDesktopProjects.enabled` 和 `registerCreatedProjects` 时，新项目不会修改正在运行的 Desktop 状态：请完全退出 Desktop，保持 Bridge 运行并等待至少 5 秒，再启动 Desktop。表单能力要求飞书客户端支持输入框和 `form_submit`。
 
 当 Codex 因命令执行或文件修改请求审批时，任务会进入“等待审批”，原项目话题内会出现“允许一次 / 拒绝 / 拒绝并停止”卡片；机器人单聊任务则在单聊中显示。Codex 的 `request_user_input` 选择题会显示选项卡，自由文本问题会使用表单输入。回调采用一次性随机令牌，重复点击或任务结束后的旧卡片会被拒绝；秘密输入问题不会转发到飞书。当前只提供单次允许，不提供“本会话全部允许”或持久修改安全策略。
 
@@ -186,7 +186,7 @@ ClawBridge 把“项目”和“对话”分开管理：项目对应一个本机
 
 本机 Codex CLI `0.147.0` 的真实 smoke 还表明：只执行 `thread/start`、尚未产生任何 turn 的纯空线程不一定出现在 App Server 的 `thread/list` 中。ClawBridge 用 `/chat new` 创建线程后会立即写入本地索引，因此该线程在飞书端仍可列出并跨重启恢复；但由其他客户端创建、从未产生 turn、且尚未被 Bridge 索引的空线程，可能需要完整线程 ID 才能首次导入。
 
-ClawBridge 与 Codex Desktop 共享底层 Codex 对话历史，但两端使用独立的 App Server 进程和客户端侧栏索引。ClawBridge 新建线程会按当前本机协议写入 `threadSource: "user"`，以贴近 Desktop 创建普通用户任务时的元数据；已经打开的 Desktop 仍不会收到另一个 App Server 进程发出的实时 `thread/started` 通知。公开 App Server API 不提供项目登记或跨进程强制刷新能力，因此 2.4.0 的 `registerCreatedProjects` 是一个显式、默认关闭的 Desktop 私有状态兼容层：只新增飞书刚创建项目的名称和绝对目录，保留状态中的其他字段，并在落盘前检查文件未被并发修改。不要在 Bridge 之外手工编辑 `.codex-global-state.json` 或 Codex SQLite；登记后仍可能需要完全退出并重启 Desktop。
+ClawBridge 与 Codex Desktop 共享底层 Codex 对话历史，但两端使用独立的 App Server 进程和客户端侧栏索引。ClawBridge 新建线程会按当前本机协议写入 `threadSource: "user"`，以贴近 Desktop 创建普通用户任务时的元数据；已经打开的 Desktop 仍不会收到另一个 App Server 进程发出的实时 `thread/started` 通知。公开 App Server API 不提供项目登记或跨进程强制刷新能力，因此 `registerCreatedProjects` 是一个显式、默认关闭的 Desktop 私有状态兼容层：只在确认 Desktop 已关闭时新增飞书刚创建项目的名称和绝对目录，保留状态中的其他字段，并在落盘前检查文件未被并发修改。不要在 Bridge 之外手工编辑 `.codex-global-state.json` 或 Codex SQLite。
 
 每个 Codex 回合结束后，Bridge 会调用 `thread/unsubscribe` 取消当前连接的线程订阅；这不会删除历史。官方 App Server 仍可能将没有订阅者的空闲线程保留为 loaded 最多约 30 分钟，因此如需立刻在 Codex Desktop 打开同一对话，请在任务结束后发送 `/chat close`。该命令会先确认全局没有排队或运行中的 Bridge 任务，再解除当前飞书绑定并关闭按需启动的 Codex App Server；下一个飞书任务会自动重新启动它。之后可用 `/chat use <编号或ID>` 重新选择原对话。若仍有任务进行中，`/chat close` 会拒绝执行，避免误中断其他项目或聊天。
 
@@ -250,7 +250,7 @@ ClawBridge 与 Codex Desktop 共享底层 Codex 对话历史，但两端使用�
 ### 持久化与配置边界
 
 - `config/projects.yaml` 是静态项目的 bootstrap 清单。启用 `codexDesktopProjects` 后，Bridge 启动及每次列出/切换项目时会刷新 Codex Desktop 项目；同一真实目录会复用现有静态 ID，不会重复登记。只有额外显式开启 `registerCreatedProjects` 时，飞书新建项目才会写入 Desktop 状态。
-- Desktop 自动项目按其内部 source ID 持久化到 SQLite；改名和目录变化会同步更新，从 Desktop 可见列表移除后会在 Bridge 中自动停用而不删除历史。目录变化时会解除旧对话绑定；若仍有排队或运行中的任务则拒绝变更，避免任务跑到另一目录。
+- Desktop 自动项目按其内部 source ID 持久化到 SQLite；飞书新建项目另有 `pending / synced / removed` 生命周期。改名和目录变化会同步更新；从正在运行的 Desktop 可见列表移除后会在 Bridge 中自动停用而不删除目录、对话历史或项目群，重新加入同一目录会恢复。目录变化时会解除旧对话绑定；若仍有排队或运行中的任务则拒绝变更，避免任务跑到另一目录。
 - Codex App Server 没有 Desktop `project/list` 或项目登记接口，因此发现器兼容的是 Desktop 私有状态格式，而不是官方稳定 API。读取时只提取 `project-order`、项目名称和 `rootPaths`；可选登记时只追加一个 `local-*` 项目并保留其他状态。升级 Desktop 后应重新运行发现器测试和本机 smoke。
 - Desktop 主状态文件无法严格解析时采用 fail-closed：`.bak` 仅用于诊断，不会作为执行授权源；此前自动项目会暂时停用，直到主状态文件恢复。这样已移除的旧项目不会因备份或 SQLite 缓存继续获得远程执行权限。
 - 通过 `/project create` 或 `/project import` 添加的动态项目、每个飞书会话的当前项目、每个项目最后选择的对话、对话编号和归档状态都保存在 `bridge.databasePath` 指向的 SQLite 数据库中，重启后仍会恢复。
