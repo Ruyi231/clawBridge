@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BridgeDatabase } from "../../src/persistence/database.js";
 import { ProjectManager } from "../../src/projects/project-manager.js";
+import { areSameResolvedPath } from "../../src/security/path-policy.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -27,7 +28,7 @@ describe("ProjectManager", () => {
     const project = await manager.createProject("demo", "Demo Project");
 
     expect(project).toMatchObject({ id: "demo", name: "Demo Project", enabled: true });
-    expect(path.dirname(project.rootPath)).toBe(path.resolve(root));
+    await expect(areSameResolvedPath(path.dirname(project.rootPath), root)).resolves.toBe(true);
     database.close();
   });
 

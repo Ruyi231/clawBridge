@@ -11,6 +11,7 @@ import { BridgeDatabase } from "../../src/persistence/database.js";
 import { Bridge } from "../../src/core/bridge.js";
 import { BridgeError } from "../../src/core/errors.js";
 import type { DesktopProjectSource } from "../../src/projects/codex-desktop-project-discovery.js";
+import { areSameResolvedPath } from "../../src/security/path-policy.js";
 
 class FakeChannel implements ChannelAdapter {
   callback?: (event: InboundEvent) => Promise<void>;
@@ -2915,12 +2916,13 @@ describe("Bridge vertical slice", () => {
       await channel.receive("/project use mobile", "runtime-use");
       await channel.receive("检查当前目录", "runtime-task");
 
-      const expectedRoot = path.join(temporaryDirectory, "mobile");
-      await vi.waitFor(() =>
-        expect(codex.runTurn).toHaveBeenCalledWith(
-          expect.objectContaining({ cwd: expectedRoot, prompt: "检查当前目录" }),
-        ),
-      );
+      await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledOnce());
+      const runInput = vi.mocked(codex.runTurn).mock.calls[0]?.[0];
+      if (!runInput) throw new Error("Codex run input was not captured");
+      expect(runInput.prompt).toBe("检查当前目录");
+      await expect(
+        areSameResolvedPath(runInput.cwd, path.join(temporaryDirectory, "mobile")),
+      ).resolves.toBe(true);
       expect(database.getProject("mobile")).toMatchObject({
         name: "手机创建的项目",
         enabled: true,
@@ -3002,20 +3004,30 @@ describe("Bridge vertical slice", () => {
       });
       await bridge.start();
 
-      expect(database.getProject("bridge-dev")).toMatchObject({ name: "claw", rootPath: clawRoot });
-      expect(database.getProject("desktop@desktop-spaced")).toMatchObject({
+      const clawProject = database.getProject("bridge-dev");
+      const spacedProject = database.getProject("desktop@desktop-spaced");
+      const chineseProject = database.getProject("desktop@desktop-chinese");
+      if (!clawProject || !spacedProject || !chineseProject) {
+        throw new Error("Expected synchronized Desktop projects were not registered");
+      }
+      expect(clawProject).toMatchObject({ name: "claw" });
+      expect(spacedProject).toMatchObject({
         name: "Project With Space",
-        rootPath: spacedRoot,
         enabled: true,
       });
+      expect(chineseProject).toMatchObject({ name: "项目文档", enabled: true });
+      await expect(areSameResolvedPath(clawProject.rootPath, clawRoot)).resolves.toBe(true);
+      await expect(areSameResolvedPath(spacedProject.rootPath, spacedRoot)).resolves.toBe(true);
+      await expect(areSameResolvedPath(chineseProject.rootPath, chineseRoot)).resolves.toBe(true);
 
       await channel.receive("/projects", "desktop-project-list");
       await vi.waitFor(() => {
         const listing = channel.sent.find((message) => message.text.includes("#1 claw"))?.text;
-        expect(listing).toContain(clawRoot);
+        expect(listing).toContain(clawProject.rootPath);
         expect(listing).toContain("#2 Project With Space");
-        expect(listing).toContain(spacedRoot);
+        expect(listing).toContain(spacedProject.rootPath);
         expect(listing).toContain("#3 项目文档");
+        expect(listing).toContain(chineseProject.rootPath);
       });
 
       await channel.receive('/project use "Project With Space"', "desktop-project-name");
