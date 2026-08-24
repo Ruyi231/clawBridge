@@ -52,7 +52,7 @@ ClawBridge 当前按“单一可信操作者、Codex Desktop 项目或受控手�
 ```yaml
 projectManagement:
   allowedRoots:
-    - D:/CodexWorkspace
+    - D:/Work
   allowCreateDirectory: true
   allowRegisterExisting: true
   codexDesktopProjects:

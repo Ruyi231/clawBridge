@@ -30,5 +30,14 @@ Test-Check "Encrypted Feishu credentials" {
   $credentials = $null
 }
 Test-Check "Codex command" { Get-Command codex -ErrorAction Stop | Out-Null }
+Test-Check "Project paths" {
+  Push-Location $projectRoot
+  try {
+    & node "scripts/verify-project-paths.mjs" --config $configPath
+    if ($LASTEXITCODE -ne 0) { throw "project path verification failed" }
+  } finally {
+    Pop-Location
+  }
+}
 
 if ($failures -gt 0) { exit 1 }

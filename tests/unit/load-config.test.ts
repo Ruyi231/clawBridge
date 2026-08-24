@@ -107,4 +107,17 @@ describe("loadConfig", () => {
 
     expect(loaded.config.projectManagement.codexDesktopProjects.stateFile).toBe(absoluteStateFile);
   });
+
+  it("resolves relative bootstrap project paths from the repository root", async () => {
+    const configPath = await writeConfiguration();
+    const projectsPath = path.resolve(path.dirname(configPath), "..", "projects.yaml");
+    await writeFile(
+      projectsPath,
+      ["projects:", "  - id: demo", "    name: Demo", "    rootPath: .", ""].join("\n"),
+    );
+
+    const loaded = await loadConfig(configPath, environment);
+
+    expect(loaded.projects[0]?.rootPath).toBe(path.resolve(path.dirname(configPath), ".."));
+  });
 });

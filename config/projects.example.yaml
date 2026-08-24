@@ -1,5 +1,6 @@
 projects:
   - id: bridge-dev
     name: ClawBridge development
-    rootPath: D:/CodexWorkspace/claw
+    # Relative paths are resolved from the repository root, so this remains valid after cloning elsewhere.
+    rootPath: .
     enabled: true

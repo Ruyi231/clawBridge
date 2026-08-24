@@ -1,6 +1,6 @@
 {
   "name": "clawbridge",
-  "version": "2.2.2",
+  "version": "2.3.0",
   "private": true,
   "description": "A local Feishu-to-Codex bridge for Windows.",
   "type": "module",
@@ -15,7 +15,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "doctor:projects": "node scripts/verify-project-paths.mjs"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.73.0",

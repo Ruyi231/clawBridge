@@ -66,7 +66,10 @@ export async function loadConfig(
       },
       projectsFile: projectsPath,
     },
-    projects: projectsDocument.projects,
+    projects: projectsDocument.projects.map((project) => ({
+      ...project,
+      rootPath: resolveFromConfig(absoluteConfigPath, project.rootPath),
+    })),
     secrets: {
       appId:
         options.requireFeishuSecrets === false

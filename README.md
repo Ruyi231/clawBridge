@@ -2,7 +2,7 @@
 
 ClawBridge 是一个运行在 Windows 本机的单用户控制桥：它通过飞书长连接接收手机消息，将任务送入本机 Codex App Server，再把结果发回飞书。电脑无需开放公网端口。
 
-当前版本为 **ClawBridge 2.2.2**。仓库已完成 Phase 0–2 以及 ClawBridge 2.0-A/B/C/D/E 的本地实现：除原有单聊控制台、项目/对话管理和持久队列外，还增加了项目群/对话话题隔离、任务中心、CardKit 流式任务卡、卡片新建项目、按对话保存模型与推理强度、命令/文件审批和 Codex 提问卡片，以及图片与受限文档附件输入。2.2.2 会在恢复历史话题时把无法上传到飞书的 Markdown 图片替换为文字占位，避免本机图片路径导致整张历史卡片创建失败；整天额度窗口也改用“天”显示。
+当前版本为 **ClawBridge 2.3.0**。仓库已完成 Phase 0–2 以及 ClawBridge 2.0-A/B/C/D/E 的本地实现：除原有单聊控制台、项目/对话管理和持久队列外，还增加了项目群/对话话题隔离、任务中心、CardKit 流式任务卡、卡片新建项目、按对话保存模型与推理强度、命令/文件审批和 Codex 提问卡片，以及图片与受限文档附件输入。2.3.0 清除了示例配置中的发布者盘符依赖，增加跨用户项目路径诊断、迁移指南、飞书后台完整清单和 Windows GitHub CI。
 
 ## 环境要求
 
@@ -11,23 +11,26 @@ ClawBridge 是一个运行在 Windows 本机的单用户控制桥：它通过飞
 - 已登录且能运行 App Server 的 Codex CLI/Desktop
 - 飞书企业自建应用，已启用机器人和长连接事件订阅
 
-## 本地安装
+## 快速安装
 
 ```powershell
-Copy-Item config/default.example.yaml config/local.yaml
-Copy-Item config/projects.example.yaml config/projects.yaml
-npm ci
-npm run build
+git clone https://github.com/Ruyi231/clawBridge.git
+Set-Location clawBridge
+.\scripts\install.ps1
 ```
 
-`config/projects.yaml` 可保留少量静态 bootstrap 项目。若希望飞书端直接复用 Codex Desktop 左栏中的本地项目，可启用自动同步；不要把真实密钥写入 YAML 或提交到 Git。
+安装脚本会生成未跟踪的 `config/local.yaml`、`config/projects.yaml`，安装锁定依赖并构建。示例 bootstrap 项目使用相对路径 `.`，所以无论仓库克隆到哪个盘符，都指向当前 ClawBridge 目录。真实凭据、本机 YAML、SQLite 和日志均被 `.gitignore` 排除。
+
+接着双击 `ClawBridge Manager.cmd` 保存三项飞书凭据并启动。完整的新电脑安装、旧实例状态迁移和项目路径规则见 [安装与迁移](docs/MIGRATION.md)，飞书开发者后台逐项配置见 [飞书开放平台配置清单](docs/FEISHU_SETUP.md)。
+
+`config/projects.yaml` 可保留少量静态 bootstrap 项目。若希望飞书端直接复用当前 Windows 用户 Codex Desktop 左栏中的本地项目，保留自动同步；不要把真实密钥写入 YAML 或提交到 Git。
 
 如需在飞书中创建或导入项目，还要编辑 `config/local.yaml` 中的项目管理配置：
 
 ```yaml
 projectManagement:
   allowedRoots:
-    - D:/CodexWorkspace
+    - D:/Work
   allowCreateDirectory: true
   allowRegisterExisting: true
   codexDesktopProjects:
@@ -37,10 +40,19 @@ projectManagement:
 - `allowedRoots`：机器人可以创建或导入项目的父目录列表。`/project create` 使用列表中的第一个目录，`/project import` 会在所有目录中查找。
 - `allowCreateDirectory`：是否允许 `/project create` 新建目录；不需要此能力时保持 `false`。
 - `allowRegisterExisting`：是否允许 `/project import` 登记已有目录；不需要此能力时保持 `false`。
-- `codexDesktopProjects.enabled`：启用后，只读 Codex Desktop 的本地项目状态，把其当前可见项目按原顺序自动登记为可执行项目，不再逐项目要求 `/project import` 或修改 `allowedRoots`。本机配置已启用。
+- `codexDesktopProjects.enabled`：启用后，只读**当前 Windows 用户**的 Codex Desktop 本地项目状态，把其当前可见项目按原顺序自动登记为可执行项目，不会继承仓库发布者的项目。
 - `codexDesktopProjects.stateFile`：可选覆盖 Desktop 状态文件路径；未配置时使用 `CODEX_HOME/.codex-global-state.json`，否则使用当前用户的 `~/.codex/.codex-global-state.json`。
 
-路径既可以写成 Windows 正斜杠形式（如 `D:/CodexWorkspace`），也可以使用 YAML 中正确转义的反斜杠。建议只配置专门存放代码的窄范围目录，不要配置磁盘根目录或用户主目录。
+路径既可以写成 Windows 正斜杠形式（如 `D:/Work`），也可以使用 YAML 中正确转义的反斜杠。建议只配置专门存放代码的窄范围目录，不要配置磁盘根目录或用户主目录。
+
+每次换电脑、换 Windows 用户或修改项目配置后，都应构建并运行只读路径诊断：
+
+```powershell
+npm run build
+npm run doctor:projects
+```
+
+诊断会列出 bootstrap 项目、`allowedRoots` 以及当前用户 Codex Desktop 项目解析后的真实目录；任何不存在、不是目录或重复指向同一目录的配置都会失败。
 
 ### ClawBridge 管理器（推荐）
 
@@ -68,12 +80,14 @@ projectManagement:
 
 ## 飞书应用配置
 
-1. 创建企业自建应用并启用机器人。
-2. 为应用添加收发单聊/群话题消息、发送交互卡片和创建群所需权限。项目群控制台和退出后自动重新加入还需要 `im:chat:readonly`（获取群组信息）、`im:chat.members:read`（查看群成员）、`im:chat.members:write_only`（添加、移除群成员）和 `im:chat:operate_as_owner`（更新应用创建群的信息）。
-3. 在事件订阅中选择“使用长连接接收事件”，订阅 `im.message.receive_v1`。
-4. 在回调配置中同样选择长连接，并订阅卡片回传交互 `card.action.trigger`。
-5. 发布应用版本，并仅向测试用户开放。以后修改权限、事件或回调订阅，也必须重新发布版本才能生效。
-6. 把测试用户的 `open_id` 配置为唯一允许的控制者。
+请严格按 [飞书开放平台配置清单](docs/FEISHU_SETUP.md) 操作。最容易遗漏的是：
+
+1. 企业自建应用必须启用机器人能力，并只向实际操作者开放。
+2. 权限至少覆盖消息收发/更新/资源、群创建/读取/更新、群成员读写及 `im:chat:operate_as_owner`。
+3. 事件配置使用长连接并添加 `im.message.receive_v1`。
+4. 回调配置也使用长连接并添加 `card.action.trigger`。
+5. 每次修改权限、事件或回调后都要创建并发布新版本。
+6. Open ID 属于具体飞书应用；换 App ID 后必须重新查询，不能照抄其他部署的 `ou_...`。
 
 启动前运行诊断：
 
@@ -132,15 +146,15 @@ ClawBridge 把“项目”和“对话”分开管理：项目对应一个本机
 
 ### 项目命令
 
-| 命令                                         | 作用与用法                                                                                                                                                                  |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/project list`                              | 刷新并按 Codex Desktop 顺序列出项目名称、真实目录和启用状态；`▶` 表示当前项目，`/projects` 与其等价。                                                                      |
-| `/project create <ID> [项目名称]`            | 在 `allowedRoots` 的第一个目录下新建 `<ID>` 目录并登记项目。例如 `/project create wafm "WaFM experiments"`。                                                                |
-| `/project import <ID> <相对路径> [项目名称]` | 登记 `allowedRoots` 下已经存在的目录。例如根目录为 `D:/CodexWorkspace` 时，`/project import claw claw "ClawBridge"` 会导入 `D:/CodexWorkspace/claw`。路径含空格时请加引号。 |
-| `/project use <名称\|#编号\|ID>`             | 按 Desktop 项目名称、列表编号或内部 ID 切换项目，并恢复该项目上次选择的对话。名称含空格时加引号，例如 `/project use "Codex Conversation Tree"`。                            |
-| `/project status`                            | 查看当前项目名称、稳定 `#编号`、真实目录、启用状态以及当前对话。                                                                                                            |
-| `/project disable <ID>`                      | 停用手工登记的项目。不会删除项目目录或对话历史；该项目有排队或运行任务时会拒绝操作。Desktop 项目请在 Desktop 中移除。                                                       |
-| `/project enable <ID>`                       | 重新启用手工停用的项目；Desktop 项目重新加入 Desktop 后会自动启用。                                                                                                         |
+| 命令                                         | 作用与用法                                                                                                                                        |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/project list`                              | 刷新并按 Codex Desktop 顺序列出项目名称、真实目录和启用状态；`▶` 表示当前项目，`/projects` 与其等价。                                            |
+| `/project create <ID> [项目名称]`            | 在 `allowedRoots` 的第一个目录下新建 `<ID>` 目录并登记项目。例如 `/project create wafm "WaFM experiments"`。                                      |
+| `/project import <ID> <相对路径> [项目名称]` | 登记 `allowedRoots` 下已经存在的目录。例如根目录为 `D:/Work` 时，`/project import demo demo "Demo"` 会导入 `D:/Work/demo`。路径含空格时请加引号。 |
+| `/project use <名称\|#编号\|ID>`             | 按 Desktop 项目名称、列表编号或内部 ID 切换项目，并恢复该项目上次选择的对话。名称含空格时加引号，例如 `/project use "Codex Conversation Tree"`。  |
+| `/project status`                            | 查看当前项目名称、稳定 `#编号`、真实目录、启用状态以及当前对话。                                                                                  |
+| `/project disable <ID>`                      | 停用手工登记的项目。不会删除项目目录或对话历史；该项目有排队或运行任务时会拒绝操作。Desktop 项目请在 Desktop 中移除。                             |
+| `/project enable <ID>`                       | 重新启用手工停用的项目；Desktop 项目重新加入 Desktop 后会自动启用。                                                                               |
 
 手工创建/导入项目时，项目 ID 只能使用小写字母、数字、下划线和连字符，最长 64 个字符。Desktop 自动项目使用内部稳定 ID，日常无需复制它，直接使用名称或 `/project list` 的 `#编号` 即可。
 
@@ -244,7 +258,7 @@ ClawBridge 与 Codex Desktop 共享底层 Codex 对话历史，但两端使用�
 - `/project import` 只接受相对于 `allowedRoots` 的路径，拒绝绝对路径、`..` 路径逃逸以及解析后越界的符号链接。若多个允许根目录中存在同名相对路径，也会拒绝导入，避免选错目录。
 - `/project create` 只在第一个允许根目录下创建一个新的直接子目录；目标已存在时不会接管，需显式使用 `/project import`。
 - 启用 `codexDesktopProjects` 表示明确授权飞书操作者使用 Codex Desktop 当前可见的所有本地项目；这些项目不再经过 `allowedRoots` 二次授权。状态文件只读，Bridge 不会修改 Desktop 项目配置。
-- Desktop 支持多目录项目；当前 Bridge 以 `rootPaths` 的第一个目录作为主 `cwd`，并在项目列表中给出多目录提示。当前本机 17 个可见项目均为单目录项目。
+- Desktop 支持多目录项目；当前 Bridge 以 `rootPaths` 的第一个目录作为主 `cwd`，并在项目列表中给出多目录提示。迁移后应运行 `npm run doctor:projects` 验证当前用户实际解析到的目录。
 - ClawBridge 没有远程删除项目目录或永久删除对话的命令。`disable` 只停用登记，`archive` 只归档对话，两者都保留数据。
 - 同一飞书会话有任务排队或运行时，项目切换、创建/切换对话等会被拒绝；可等待任务结束或用 `/stop` 中断运行回合。正在运行或被租约占用的对话也不能切换、重命名或归档。
 - 普通消息一次只进入当前项目绑定的一个对话。发送任务前可用 `/project status` 再次确认工作目录和对话，避免在手机端选错上下文。

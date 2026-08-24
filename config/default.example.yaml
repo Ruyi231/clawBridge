@@ -23,14 +23,14 @@ codex:
   turnTimeoutMs: 600000
 
 projectManagement:
-  # Runtime-created/imported projects must remain under one of these roots.
-  allowedRoots:
-    - D:/CodexWorkspace
-  allowCreateDirectory: true
-  allowRegisterExisting: true
+  # Add only parent directories that this Windows user explicitly wants the bot to manage.
+  # Relative paths are resolved from the repository root. An empty list is the safe default.
+  allowedRoots: []
+  allowCreateDirectory: false
+  allowRegisterExisting: false
   # When enabled, every visible local project in Codex Desktop is automatically trusted and
   # synchronized. The Desktop state file is only read; ClawBridge never writes it.
   codexDesktopProjects:
-    enabled: false
+    enabled: true
 
 projectsFile: ./config/projects.yaml
