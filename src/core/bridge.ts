@@ -833,8 +833,9 @@ export class Bridge {
         if (!name || name.length > 80 || /[\\/:*?"<>|\r\n]/.test(name)) {
           throw new Error("项目名称需为 1–80 个字符，且不能包含路径保留字符。 ");
         }
-        const projectId = `mobile-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}`;
-        const project = await this.projectManager.createProject(projectId, name);
+        const projectId = this.mobileProjectId(name);
+        const project = await this.projectManager.createProject(projectId, name, name);
+        await this.registerCreatedDesktopProject(project);
         this.dependencies.database.selectProject(event.chatId, project.id);
         await this.openProjectSpace(event.chatId, event.senderOpenId, project.id, event.messageId);
         return;
@@ -2168,6 +2169,41 @@ export class Bridge {
     ]);
     database.setProjectEnabled(project.id, true);
     this.reply(chatId, `已启用项目 ${project.name} (${project.id})。`);
+  }
+
+  private mobileProjectId(name: string): string {
+    const candidate = name
+      .normalize("NFKC")
+      .toLocaleLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 64);
+    if (
+      /^[a-z0-9][a-z0-9_-]{0,63}$/.test(candidate) &&
+      !this.dependencies.database.getProject(candidate)
+    ) {
+      return candidate;
+    }
+    return `mobile-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  }
+
+  private async registerCreatedDesktopProject(project: ProjectRecord): Promise<void> {
+    const register = this.dependencies.desktopProjects?.registerProject;
+    if (!register) return;
+    try {
+      await register.call(this.dependencies.desktopProjects, {
+        name: project.name,
+        rootPath: project.rootPath,
+      });
+      await this.refreshDesktopProjects();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.desktopSyncWarning = `项目目录已创建，但 Codex Desktop 登记失败：${detail}`;
+      this.dependencies.logger.warn(
+        { err: error, projectId: project.id },
+        "Failed to register a created project in Codex Desktop",
+      );
+    }
   }
 
   private async runChatCommand(

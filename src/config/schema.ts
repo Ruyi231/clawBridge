@@ -61,14 +61,15 @@ export const bridgeConfigSchema = z.object({
         .object({
           enabled: z.boolean().default(false),
           stateFile: z.string().min(1).optional(),
+          registerCreatedProjects: z.boolean().default(false),
         })
-        .default({ enabled: false }),
+        .default({ enabled: false, registerCreatedProjects: false }),
     })
     .default({
       allowedRoots: [],
       allowCreateDirectory: false,
       allowRegisterExisting: false,
-      codexDesktopProjects: { enabled: false },
+      codexDesktopProjects: { enabled: false, registerCreatedProjects: false },
     }),
   projectsFile: z.string().min(1),
 });

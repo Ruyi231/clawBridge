@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -229,5 +229,67 @@ describe("CodexDesktopProjectDiscovery", () => {
       "Unable to read Codex Desktop project state or its backup.",
     );
     await expect(result).rejects.not.toThrow(/primary secret payload|backup secret payload/);
+  });
+
+  it("registers a created project while preserving unrelated Desktop state", async () => {
+    const stateFile = temporaryStateFile();
+    writeJson(stateFile, {
+      "project-order": ["existing"],
+      "local-projects": {
+        existing: { id: "existing", name: "Existing", rootPaths: ["D:\\existing"] },
+      },
+      privateSetting: { keep: true },
+    });
+    const source = new CodexDesktopProjectDiscovery({
+      stateFile,
+      registerCreatedProjects: true,
+    });
+
+    const result = await source.registerProject({
+      name: "test_codex",
+      rootPath: "D:\\CodexWorkspace\\test_codex",
+    });
+    const persisted = JSON.parse(readFileSync(stateFile, "utf8")) as Record<string, unknown>;
+    const projects = persisted["local-projects"] as Record<string, Record<string, unknown>>;
+
+    expect(result.created).toBe(true);
+    expect(result.sourceId).toMatch(/^local-[0-9a-f]{32}$/);
+    expect(persisted.privateSetting).toEqual({ keep: true });
+    expect(persisted["project-order"]).toEqual(["existing", result.sourceId]);
+    expect(projects[result.sourceId]).toMatchObject({
+      id: result.sourceId,
+      name: "test_codex",
+      rootPaths: [path.resolve("D:\\CodexWorkspace\\test_codex")],
+    });
+  });
+
+  it("does not duplicate an already registered root and requires explicit write opt-in", async () => {
+    const stateFile = temporaryStateFile();
+    writeJson(stateFile, {
+      "project-order": ["existing"],
+      "local-projects": {
+        existing: {
+          id: "existing",
+          name: "Existing",
+          rootPaths: ["D:\\CodexWorkspace\\test_codex"],
+        },
+      },
+    });
+
+    await expect(
+      new CodexDesktopProjectDiscovery({ stateFile }).registerProject({
+        name: "test_codex",
+        rootPath: "D:\\CodexWorkspace\\test_codex",
+      }),
+    ).rejects.toThrow("registration is disabled");
+    await expect(
+      new CodexDesktopProjectDiscovery({
+        stateFile,
+        registerCreatedProjects: true,
+      }).registerProject({
+        name: "test_codex",
+        rootPath: "D:\\CodexWorkspace\\test_codex",
+      }),
+    ).resolves.toEqual({ sourceId: "existing", created: false });
   });
 });

@@ -25,7 +25,7 @@ Set-Location clawBridge
 ClawBridge 有两个独立项目来源：
 
 1. `config/projects.yaml`：静态 bootstrap 项目。相对 `rootPath` 从仓库根目录解析；示例中的 `.` 永远指向当前克隆的 ClawBridge 仓库，不依赖盘符或用户名。
-2. Codex Desktop 自动发现：当 `codexDesktopProjects.enabled: true` 时，默认只读当前 Windows 用户的 `%CODEX_HOME%\.codex-global-state.json`，未设置 `CODEX_HOME` 时读取 `%USERPROFILE%\.codex\.codex-global-state.json`。它不会读取发布者的项目列表。
+2. Codex Desktop 自动发现：当 `codexDesktopProjects.enabled: true` 时，默认读取当前 Windows 用户的 `%CODEX_HOME%\.codex-global-state.json`，未设置 `CODEX_HOME` 时读取 `%USERPROFILE%\.codex\.codex-global-state.json`。它不会读取发布者的项目列表。只有额外开启 `registerCreatedProjects`，才会把飞书新建项目追加到当前用户状态。
 
 `allowedRoots` 只控制机器人“新建项目/导入项目”的边界，不限制 Desktop 已经登记的项目。建议每个用户在自己的 `config/local.yaml` 中填写窄范围的真实代码父目录，例如：
 
@@ -38,6 +38,7 @@ projectManagement:
   allowRegisterExisting: true
   codexDesktopProjects:
     enabled: true
+    registerCreatedProjects: true
 ```
 
 不要使用 `C:/`、`D:/` 或整个用户主目录。Desktop 多目录项目当前只使用第一个 `rootPaths` 作为 Codex 工作目录。

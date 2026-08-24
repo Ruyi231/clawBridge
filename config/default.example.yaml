@@ -29,8 +29,10 @@ projectManagement:
   allowCreateDirectory: false
   allowRegisterExisting: false
   # When enabled, every visible local project in Codex Desktop is automatically trusted and
-  # synchronized. The Desktop state file is only read; ClawBridge never writes it.
+  # synchronized. registerCreatedProjects is an explicit opt-in that adds projects created by
+  # the bot to the current Windows user's Desktop state; Desktop may need a restart to refresh.
   codexDesktopProjects:
     enabled: true
+    registerCreatedProjects: true
 
 projectsFile: ./config/projects.yaml

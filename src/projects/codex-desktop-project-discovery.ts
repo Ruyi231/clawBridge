@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -18,10 +19,15 @@ export interface DesktopProjectSnapshot {
 
 export interface DesktopProjectSource {
   listProjects(): Promise<DesktopProjectSnapshot>;
+  registerProject?(input: { name: string; rootPath: string }): Promise<{
+    sourceId: string;
+    created: boolean;
+  }>;
 }
 
 export interface CodexDesktopProjectDiscoveryOptions {
   stateFile?: string;
+  registerCreatedProjects?: boolean;
 }
 
 interface DesktopStateShape {
@@ -125,10 +131,13 @@ function defaultStateFile(): string {
 
 export class CodexDesktopProjectDiscovery implements DesktopProjectSource {
   private readonly stateFile: string;
+  private readonly registerCreatedProjects: boolean;
 
   constructor(options: CodexDesktopProjectDiscoveryOptions | string = {}) {
     this.stateFile =
       typeof options === "string" ? options : (options.stateFile ?? defaultStateFile());
+    this.registerCreatedProjects =
+      typeof options === "string" ? false : (options.registerCreatedProjects ?? false);
   }
 
   async listProjects(): Promise<DesktopProjectSnapshot> {
@@ -144,6 +153,70 @@ export class CodexDesktopProjectDiscovery implements DesktopProjectSource {
     }
   }
 
+  async registerProject(input: { name: string; rootPath: string }): Promise<{
+    sourceId: string;
+    created: boolean;
+  }> {
+    if (!this.registerCreatedProjects) {
+      throw new Error("Codex Desktop project registration is disabled.");
+    }
+
+    const original = await readFile(this.stateFile, "utf8");
+    const parsed: unknown = JSON.parse(original);
+    if (!isRecord(parsed)) throw new Error("Codex Desktop project state must be an object.");
+    const order = parsed["project-order"];
+    const localProjects = parsed["local-projects"];
+    if (!Array.isArray(order) || !isRecord(localProjects)) {
+      throw new Error("Codex Desktop project state has an unsupported shape.");
+    }
+
+    const targetRoot = canonicalPath(input.rootPath);
+    let existingSourceId: string | undefined;
+    for (const [sourceId, candidate] of Object.entries(localProjects)) {
+      if (!isRecord(candidate) || !Array.isArray(candidate.rootPaths)) continue;
+      if (
+        candidate.rootPaths.some(
+          (rootPath) => typeof rootPath === "string" && canonicalPath(rootPath) === targetRoot,
+        )
+      ) {
+        existingSourceId = sourceId;
+        if (order.includes(sourceId)) return { sourceId, created: false };
+        order.push(sourceId);
+        break;
+      }
+    }
+
+    const sourceId = existingSourceId ?? `local-${randomBytes(16).toString("hex")}`;
+    const now = Date.now();
+    if (!existingSourceId) {
+      localProjects[sourceId] = {
+        id: sourceId,
+        name: input.name,
+        rootPaths: [path.resolve(input.rootPath)],
+        createdAt: now,
+        updatedAt: now,
+      };
+      order.push(sourceId);
+    }
+
+    const temporary = `${this.stateFile}.${process.pid}.${now}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify(parsed), { encoding: "utf8", flag: "wx" });
+      const current = await readFile(this.stateFile, "utf8");
+      if (current !== original) {
+        throw new Error(
+          "Codex Desktop project state changed while ClawBridge was registering the project; retry after Desktop becomes idle.",
+        );
+      }
+      await rename(temporary, this.stateFile);
+    } finally {
+      await unlink(temporary).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      });
+    }
+    return { sourceId, created: !existingSourceId };
+  }
+
   private async readSnapshot(
     sourcePath: string,
     usedBackup: boolean,
@@ -155,4 +228,9 @@ export class CodexDesktopProjectDiscovery implements DesktopProjectSource {
       usedBackup,
     };
   }
+}
+
+function canonicalPath(candidate: string): string {
+  const resolved = path.resolve(candidate);
+  return process.platform === "win32" ? resolved.toLocaleLowerCase() : resolved;
 }

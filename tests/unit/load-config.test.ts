@@ -63,7 +63,10 @@ describe("loadConfig", () => {
 
     const loaded = await loadConfig(configPath, environment);
 
-    expect(loaded.config.projectManagement.codexDesktopProjects).toEqual({ enabled: false });
+    expect(loaded.config.projectManagement.codexDesktopProjects).toEqual({
+      enabled: false,
+      registerCreatedProjects: false,
+    });
     expect(loaded.config.bridge.attachmentDirectory).toBe(
       path.resolve(path.dirname(configPath), "..", "data/attachments"),
     );
@@ -81,6 +84,7 @@ describe("loadConfig", () => {
 
     expect(loaded.config.projectManagement.codexDesktopProjects).toEqual({
       enabled: true,
+      registerCreatedProjects: false,
       stateFile: path.resolve(path.dirname(configPath), "..", "state/desktop.json"),
     });
   });

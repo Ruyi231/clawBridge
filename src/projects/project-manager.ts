@@ -4,6 +4,7 @@ import { BridgeError } from "../core/errors.js";
 import type { BridgeDatabase, ProjectRecord } from "../persistence/database.js";
 
 const projectIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const windowsReservedNamePattern = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 
 function canonical(candidate: string): string {
   const resolved = path.resolve(candidate);
@@ -32,6 +33,25 @@ function validateProject(projectId: string, name: string): string {
   return normalizedName;
 }
 
+function validateDirectoryName(directoryName: string): string {
+  const normalized = directoryName.trim();
+  if (
+    !normalized ||
+    normalized.length > 100 ||
+    normalized === "." ||
+    normalized === ".." ||
+    /[\\/:*?"<>|\u0000-\u001f]/.test(normalized) ||
+    /[. ]$/.test(normalized) ||
+    windowsReservedNamePattern.test(normalized)
+  ) {
+    throw new BridgeError(
+      "INVALID_PROJECT_PATH",
+      "项目目录名称无效；不能包含路径保留字符、控制字符、结尾空格/句点或 Windows 保留名称。",
+    );
+  }
+  return normalized;
+}
+
 function isExplicitAbsolute(candidate: string): boolean {
   return path.isAbsolute(candidate) || path.win32.isAbsolute(candidate);
 }
@@ -46,15 +66,20 @@ export class ProjectManager {
     },
   ) {}
 
-  async createProject(projectId: string, name = projectId): Promise<ProjectRecord> {
+  async createProject(
+    projectId: string,
+    name = projectId,
+    directoryName = projectId,
+  ): Promise<ProjectRecord> {
     const normalizedName = validateProject(projectId, name);
+    const normalizedDirectoryName = validateDirectoryName(directoryName);
     this.assertNewProjectId(projectId);
     if (!this.options.allowCreateDirectory) {
       throw new BridgeError("PROJECT_CREATE_DISABLED", "当前配置不允许通过机器人创建项目目录。");
     }
 
     const root = await this.primaryRoot();
-    const target = path.resolve(root, projectId);
+    const target = path.resolve(root, normalizedDirectoryName);
     if (!isWithin(root, target) || canonical(target) === canonical(root)) {
       throw new BridgeError("PATH_OUTSIDE_PROJECT", "项目目录超出允许的项目根目录。");
     }

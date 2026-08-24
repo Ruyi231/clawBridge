@@ -173,9 +173,10 @@ async function main(): Promise<void> {
   const codex = new CodexAppServerClient(loaded.config.codex);
   const desktopProjectConfig = loaded.config.projectManagement.codexDesktopProjects;
   const desktopProjects = desktopProjectConfig.enabled
-    ? new CodexDesktopProjectDiscovery(
-        desktopProjectConfig.stateFile ? { stateFile: desktopProjectConfig.stateFile } : {},
-      )
+    ? new CodexDesktopProjectDiscovery({
+        ...(desktopProjectConfig.stateFile ? { stateFile: desktopProjectConfig.stateFile } : {}),
+        registerCreatedProjects: desktopProjectConfig.registerCreatedProjects,
+      })
     : undefined;
   codex.on("stderr", (message: string) =>
     logger.debug({ source: "codex", message }, "Codex stderr"),

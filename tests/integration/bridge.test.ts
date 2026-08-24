@@ -210,7 +210,7 @@ const config: BridgeConfig = {
     allowedRoots: [],
     allowCreateDirectory: false,
     allowRegisterExisting: false,
-    codexDesktopProjects: { enabled: false },
+    codexDesktopProjects: { enabled: false, registerCreatedProjects: false },
   },
   projectsFile: "projects.yaml",
 };
@@ -1106,6 +1106,68 @@ describe("Bridge vertical slice", () => {
     expect(
       database.resolveFeishuPendingTopic("chat-created-project", "topic-created-thread"),
     ).toBeUndefined();
+  });
+
+  it("creates a mobile project in a matching directory and registers it with Desktop", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "clawbridge-mobile-project-"));
+    const channel = new FakeChannel();
+    const database = new BridgeDatabase(":memory:");
+    const registerProject = vi.fn(async () => ({ sourceId: "desktop-test", created: true }));
+    const desktopProjects: DesktopProjectSource = {
+      listProjects: vi.fn(async () => ({
+        projects: [],
+        sourcePath: path.join(root, ".codex-global-state.json"),
+        usedBackup: false,
+      })),
+      registerProject,
+    };
+    bridge = new Bridge({
+      channel,
+      codex: fakeCodex(),
+      database,
+      config: {
+        ...config,
+        projectManagement: {
+          allowedRoots: [root],
+          allowCreateDirectory: true,
+          allowRegisterExisting: false,
+          codexDesktopProjects: { enabled: true, registerCreatedProjects: true },
+        },
+      },
+      projects: [],
+      desktopProjects,
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+    try {
+      await bridge.start();
+      await channel.receive("/menu", "mobile-project-menu");
+      await vi.waitFor(() =>
+        expect(channel.sent.some((message) => message.kind === "card")).toBe(true),
+      );
+      await channel.receiveCard(
+        { version: 1, action: "project.create" },
+        "mobile-project-create",
+        "owner",
+        channel.latestCardMessageIdForChat("chat-owner"),
+        { projectName: "test_codex" },
+      );
+
+      await vi.waitFor(() => expect(database.getProject("test_codex")).toBeDefined());
+      const project = database.getProject("test_codex");
+      expect(project?.name).toBe("test_codex");
+      expect(path.basename(project?.rootPath ?? "")).toBe("test_codex");
+      expect(existsSync(path.join(root, "test_codex"))).toBe(true);
+      expect(registerProject).toHaveBeenCalledWith({
+        name: "test_codex",
+        rootPath: project?.rootPath,
+      });
+    } finally {
+      await bridge.stop();
+      bridge = undefined;
+      database.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("reinvites the owner when an existing project group was temporarily left", async () => {
@@ -2903,7 +2965,7 @@ describe("Bridge vertical slice", () => {
             allowedRoots: [temporaryDirectory],
             allowCreateDirectory: true,
             allowRegisterExisting: true,
-            codexDesktopProjects: { enabled: false },
+            codexDesktopProjects: { enabled: false, registerCreatedProjects: false },
           },
         },
         projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
@@ -2992,7 +3054,7 @@ describe("Bridge vertical slice", () => {
           ...config,
           projectManagement: {
             ...config.projectManagement,
-            codexDesktopProjects: { enabled: true },
+            codexDesktopProjects: { enabled: true, registerCreatedProjects: false },
           },
         },
         projects: [
@@ -3100,7 +3162,7 @@ describe("Bridge vertical slice", () => {
           ...config,
           projectManagement: {
             ...config.projectManagement,
-            codexDesktopProjects: { enabled: true },
+            codexDesktopProjects: { enabled: true, registerCreatedProjects: false },
           },
         },
         projects: [],

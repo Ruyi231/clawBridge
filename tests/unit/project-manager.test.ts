@@ -25,9 +25,10 @@ describe("ProjectManager", () => {
       allowRegisterExisting: true,
     });
 
-    const project = await manager.createProject("demo", "Demo Project");
+    const project = await manager.createProject("demo", "Demo Project", "test_codex");
 
     expect(project).toMatchObject({ id: "demo", name: "Demo Project", enabled: true });
+    expect(path.basename(project.rootPath)).toBe("test_codex");
     await expect(areSameResolvedPath(path.dirname(project.rootPath), root)).resolves.toBe(true);
     database.close();
   });
@@ -73,6 +74,9 @@ describe("ProjectManager", () => {
     });
     await expect(manager.createProject("taken")).rejects.toMatchObject({
       code: "PROJECT_PATH_EXISTS",
+    });
+    await expect(manager.createProject("device", "Device", "CON")).rejects.toMatchObject({
+      code: "INVALID_PROJECT_PATH",
     });
     expect(database.getProject("taken")).toBeUndefined();
     database.close();

@@ -28,7 +28,7 @@
 ### 项目管理
 
 - `projects.yaml` 继续作为启动时的项目 bootstrap；运行期创建、导入、启用和停用状态持久化到 SQLite
-- 可选 `codexDesktopProjects.enabled` 已在本机启用：Bridge 只读 Desktop 的 `project-order`/`local-projects`，自动同步当前可见项目名称、顺序和主目录，不要求逐项目授权
+- 可选 `codexDesktopProjects.enabled` 已在本机启用：Bridge 读取 Desktop 的 `project-order`/`local-projects`，自动同步当前可见项目名称、顺序和主目录，不要求逐项目授权；2.4.0 可通过独立开关把飞书新建项目登记回当前用户 Desktop
 - Desktop 项目与现有静态项目按规范化真实路径合并；自动项目使用保留前缀的稳定内部 ID，移出 Desktop 列表后只停用、不删除历史
 - `/project create <ID> [名称]` 只会在配置的首个 `projectManagement.allowedRoots` 下创建新的直属目录
 - `/project import <ID> <相对路径> [名称]` 只会登记 `allowedRoots` 内已经存在的目录，不接受绝对路径
@@ -171,7 +171,7 @@
 
 ### v2.0.2 Desktop 项目归属补丁
 
-- Desktop 左侧项目中的对话不一定以项目根目录作为线程 `cwd`；部分对话由 `.codex-global-state.json` 的私有 `thread-project-assignments` 映射归入项目。Bridge 现在以只读、严格校验方式同步这些线程 ID，并通过官方 `thread/read` 获取对话内容，不写 Desktop 状态文件。
+- Desktop 左侧项目中的对话不一定以项目根目录作为线程 `cwd`；部分对话由 `.codex-global-state.json` 的私有 `thread-project-assignments` 映射归入项目。Bridge 以严格校验方式同步这些线程 ID，并通过官方 `thread/read` 获取对话内容；只有 `registerCreatedProjects` 显式开启时才追加飞书新建项目，不修改线程归属。
 - 目录匹配仍作为没有显式项目归属时的兼容路径；显式 Desktop 项目归属优先，避免历史工作区、迁移目录或会话原始目录不同造成漏检。
 - 显式“新对话”创建后不再立即退订空线程；Bridge 会保留订阅直到用户发送首条任务并生成 rollout，任务完成后再按既有逻辑自动释放，避免项目话题中的第一条消息触发 `no rollout found`。
 - 2026-08-13 验证：临时 App Server 探针确认不带 `cwd` 的 `thread/list` 可见 59 条主对话，而 `codex 额度浮窗` 当前根目录过滤结果为 0，证明仅依赖 `cwd` 不足。修复后 `npm run check` 与全量 Vitest 通过，18 个测试文件共 197 项测试。
