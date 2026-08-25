@@ -1,0 +1,18 @@
+{
+  "scopes": {
+    "tenant": [
+      "cardkit:card:read",
+      "cardkit:card:write",
+      "im:chat.members:bot_access",
+      "im:chat:create",
+      "im:chat:read",
+      "im:chat:update",
+      "im:message.p2p_msg:readonly",
+      "im:message:readonly",
+      "im:message:send_as_bot",
+      "im:message:update",
+      "im:resource"
+    ],
+    "user": []
+  }
+}

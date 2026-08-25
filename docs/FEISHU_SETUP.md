@@ -11,22 +11,66 @@
 
 ## 2. 权限管理
 
-在“开发配置 → 权限管理”中按权限码搜索。建议使用下面的兼容权限集合：
+### 2.1 推荐：批量导入最小权限
 
-| 权限码                               | ClawBridge 用途                                                      |
-| ------------------------------------ | -------------------------------------------------------------------- |
-| `im:message`                         | 以机器人身份发送文本、交互卡片和话题回复                             |
-| `im:message:readonly`                | 读取机器人收到的消息和卡片回调上下文                                 |
-| `im:message:update`                  | 原位更新控制卡、模型卡和任务流式卡片                                 |
-| `im:resource`                        | 下载用户消息中的图片和受支持文件                                     |
-| `im:chat:create`                     | 为项目创建私有项目群；若后台只提供 `im:chat`，可使用该群管理综合权限 |
-| `im:chat:read` 或 `im:chat:readonly` | 检查已有项目群是否仍存在及其消息模式                                 |
-| `im:chat:update`                     | 更新旧项目群的名称、配置和消息模式                                   |
-| `im:chat.members:read`               | 检查唯一授权用户是否仍在项目群                                       |
-| `im:chat.members:write_only`         | 用户退出后重新邀请，以及退出并丢弃项目群                             |
-| `im:chat:operate_as_owner`           | 让创建群的机器人以群主能力维护成员和群信息                           |
+ClawBridge 使用 `tenant_access_token` 以应用/机器人身份访问飞书，不需要用户身份权限。进入“开发配置 → 权限管理”，使用“批量导入/导出权限”功能，将 [feishu-permissions.json](./feishu-permissions.json) 的完整内容粘贴并导入：
 
-飞书可能把综合权限拆成更细的权限。若 API 报 `99991672 Access denied`，以错误里的 `requires ... scope` 为准补充对应权限；补权限后必须重新发布应用版本。不要为了省事开通讯录、云文档、邮箱等与 ClawBridge 无关的权限。
+```json
+{
+  "scopes": {
+    "tenant": [
+      "cardkit:card:read",
+      "cardkit:card:write",
+      "im:chat.members:bot_access",
+      "im:chat:create",
+      "im:chat:read",
+      "im:chat:update",
+      "im:message.p2p_msg:readonly",
+      "im:message:readonly",
+      "im:message:send_as_bot",
+      "im:message:update",
+      "im:resource"
+    ],
+    "user": []
+  }
+}
+```
+
+导入后检查权限列表并创建、发布一个新的应用版本。仅在后台导入但没有发布，新权限不会对正在运行的机器人生效。
+
+不要直接导入某个开发者账号导出的完整权限文件。该文件可能同时包含云文档、邮箱、审批、多维表格等 ClawBridge 不使用的权限，还可能包含大量 `user` 权限。批量导入通常也不会自动撤销此前已开通的无关权限；如需最小权限部署，请在导入后人工复核并移除无关项。
+
+### 2.2 权限用途
+
+上面的批量导入文件采用当前飞书权限中心可导出的应用身份权限：
+
+| 权限码                        | ClawBridge 用途                                |
+| ----------------------------- | ---------------------------------------------- |
+| `cardkit:card:read`           | 读取 CardKit 卡片状态，支持流式卡片及原位刷新  |
+| `cardkit:card:write`          | 创建和更新流式任务卡、控制卡                   |
+| `im:message.p2p_msg:readonly` | 接收机器人单聊消息，用于菜单、配对和控制台操作 |
+| `im:message:readonly`         | 接收项目群及对话话题中的任务消息               |
+| `im:message:send_as_bot`      | 以机器人身份发送文本、卡片和话题回复           |
+| `im:message:update`           | 原位更新控制卡、模型卡和任务流式卡片           |
+| `im:resource`                 | 下载用户消息中的图片和受支持文件               |
+| `im:chat:create`              | 为项目创建私有项目群                           |
+| `im:chat:read`                | 检查已有项目群是否仍存在、读取群配置           |
+| `im:chat:update`              | 更新项目群名称、配置和消息模式                 |
+| `im:chat.members:bot_access`  | 允许机器人检查和维护其所在项目群的成员         |
+
+### 2.3 权限版本差异和报错补充
+
+不同租户或飞书权限目录版本可能显示更细的群成员权限。如果项目群的成员检查、重新邀请或丢弃操作返回 `99991672 Access denied`，根据错误中的 `requires ... scope` 补充下列对应权限，再重新发布应用版本：
+
+| 可能要求的权限码             | 用途                                         |
+| ---------------------------- | -------------------------------------------- |
+| `im:chat:readonly`           | `im:chat:read` 的旧版/兼容权限               |
+| `im:chat.members:read`       | 读取群成员                                   |
+| `im:chat.members:write_only` | 邀请或移除群成员                             |
+| `im:chat:operate_as_owner`   | 允许创建群的机器人以群主能力维护成员和群信息 |
+| `im:chat`                    | 某些租户提供的群管理综合权限                 |
+
+飞书 CLI 可用 `lark-cli schema im.chats.create`、`lark-cli schema im.chats.get`、`lark-cli schema im.chats.update` 和 `lark-cli schema im.chat.members.get` 等命令查看接口当前接受的权限。接口列出的权限通常是“满足其中之一”，不是要求全部开启；优先保留批量导入文件中的细粒度权限，不要为了省事开通讯录、云文档、邮箱等无关权限。
 
 ## 3. 事件与回调
 
