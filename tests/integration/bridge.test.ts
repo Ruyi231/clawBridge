@@ -627,9 +627,9 @@ describe("Bridge vertical slice", () => {
   });
 
   it("routes a registered project topic to its bound Codex thread", async () => {
-    const channel = new FakeChannel();
+    const channel = new FakeChannel({ updateCards: true });
     const codex = fakeCodex();
-    vi.mocked(codex.runTurn).mockImplementationOnce(async (input) => {
+    vi.mocked(codex.runTurn).mockImplementation(async (input) => {
       input.onStarted?.({ threadId: "thread-topic", turnId: "turn-topic" });
       return { threadId: "thread-topic", turnId: "turn-topic", finalText: "done" };
     });
@@ -681,6 +681,26 @@ describe("Bridge vertical slice", () => {
             JSON.stringify(message.card).includes("model.list"),
         ),
       ).toBe(true),
+    );
+    const firstToolbarMessageId = database.getFeishuThreadRoute("thread-topic")?.toolbarMessageId;
+    expect(firstToolbarMessageId).toMatch(/^sent-/);
+
+    await channel.receiveGroup("再检查一次", "topic-task-2", {
+      topicRootId: "topic-root-1",
+    });
+    await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(channel.updatedCards.some((entry) => entry.messageId === firstToolbarMessageId)).toBe(
+        true,
+      ),
+    );
+    expect(
+      channel.sent.filter(
+        (message) => message.kind === "card" && message.text.includes("模型设置"),
+      ),
+    ).toHaveLength(1);
+    expect(database.getFeishuThreadRoute("thread-topic")?.toolbarMessageId).toBe(
+      firstToolbarMessageId,
     );
   });
 

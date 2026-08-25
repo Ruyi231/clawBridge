@@ -366,6 +366,19 @@ describe("SQLite migration contract", () => {
         INSERT INTO projects VALUES
           ('mobile-oldproject', 'Mobile', 'D:/mobile', 1),
           ('desktop@local', 'Desktop', 'D:/desktop', 1);
+        CREATE TABLE feishu_thread_routes (
+          thread_id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          chat_id TEXT NOT NULL,
+          topic_root_id TEXT NOT NULL,
+          owner_open_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(chat_id, topic_root_id)
+        );
+        INSERT INTO feishu_thread_routes VALUES(
+          'thread-old', 'mobile-oldproject', 'chat-old', 'topic-old', 'owner', 'x', 'x'
+        );
       `);
       legacy.close();
 
@@ -379,6 +392,10 @@ describe("SQLite migration contract", () => {
       expect(bridgeDatabase.setDesktopProjectSync("mobile-oldproject", "removed")).toMatchObject({
         state: "removed",
       });
+      expect(bridgeDatabase.getFeishuThreadRoute("thread-old")?.toolbarMessageId).toBeNull();
+      expect(bridgeDatabase.setFeishuThreadToolbarMessage("thread-old", "message-toolbar")).toBe(
+        true,
+      );
 
       bridgeDatabase.close();
       bridgeDatabase = undefined;
@@ -386,6 +403,16 @@ describe("SQLite migration contract", () => {
       expect(
         migrated.prepare("SELECT version FROM schema_migrations WHERE version=12").get(),
       ).toEqual({ version: 12 });
+      expect(
+        migrated.prepare("SELECT version FROM schema_migrations WHERE version=13").get(),
+      ).toEqual({ version: 13 });
+      expect(
+        migrated
+          .prepare(
+            "SELECT toolbar_message_id FROM feishu_thread_routes WHERE thread_id='thread-old'",
+          )
+          .get(),
+      ).toEqual({ toolbar_message_id: "message-toolbar" });
       migrated.close();
     } finally {
       bridgeDatabase?.close();

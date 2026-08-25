@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS feishu_thread_routes (
   chat_id TEXT NOT NULL,
   topic_root_id TEXT NOT NULL,
   owner_open_id TEXT NOT NULL,
+  toolbar_message_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(chat_id, topic_root_id),
@@ -227,6 +228,7 @@ export interface FeishuThreadRouteRecord {
   chatId: string;
   topicRootId: string;
   ownerOpenId: string;
+  toolbarMessageId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -296,6 +298,7 @@ interface FeishuThreadRouteRow {
   chat_id: string;
   topic_root_id: string;
   owner_open_id: string;
+  toolbar_message_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -496,6 +499,7 @@ export class BridgeDatabase {
     this.migrateTaskAttachments();
     this.migratePendingFeishuTopics();
     this.migrateDesktopProjectSync();
+    this.migrateFeishuThreadToolbar();
   }
 
   close(): void {
@@ -1310,6 +1314,16 @@ export class BridgeDatabase {
     return row ? this.toFeishuThreadRoute(row) : undefined;
   }
 
+  setFeishuThreadToolbarMessage(threadId: string, messageId: string): boolean {
+    return (
+      this.database
+        .prepare(
+          "UPDATE feishu_thread_routes SET toolbar_message_id = ?, updated_at = ? WHERE thread_id = ?",
+        )
+        .run(messageId, new Date().toISOString(), threadId).changes > 0
+    );
+  }
+
   resolveFeishuThreadRoute(
     chatId: string,
     topicRootId: string,
@@ -1365,6 +1379,7 @@ export class BridgeDatabase {
       chatId: row.chat_id,
       topicRootId: row.topic_root_id,
       ownerOpenId: row.owner_open_id,
+      toolbarMessageId: row.toolbar_message_id,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -2197,6 +2212,26 @@ export class BridgeDatabase {
         .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(12, ?)")
         .run(now);
     })();
+  }
+
+  private migrateFeishuThreadToolbar(): void {
+    const applied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 13")
+      .get();
+    if (applied) return;
+    const columns = new Set(
+      (
+        this.database.prepare("PRAGMA table_info(feishu_thread_routes)").all() as Array<{
+          name: string;
+        }>
+      ).map((column) => column.name),
+    );
+    if (!columns.has("toolbar_message_id")) {
+      this.database.exec("ALTER TABLE feishu_thread_routes ADD COLUMN toolbar_message_id TEXT");
+    }
+    this.database
+      .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(13, ?)")
+      .run(new Date().toISOString());
   }
 }
 

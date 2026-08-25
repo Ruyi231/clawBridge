@@ -1727,25 +1727,36 @@ export class Bridge {
       selectedModel: execution?.model ?? null,
       selectedReasoningEffort: execution?.reasoningEffort ?? null,
     });
-    if (replaceMessageId) {
+    const fallbackText = `对话 #${thread.localNumber} 模型设置`;
+    const toolbarMessageId =
+      replaceMessageId ??
+      route.toolbarMessageId ??
+      database.getLatestSentCardMessageId({
+        chatId: route.chatId,
+        body: fallbackText,
+        audience: "group",
+      });
+    if (toolbarMessageId) {
       await this.updateOrReplyCard(
-        replaceMessageId,
+        toolbarMessageId,
         route.chatId,
         card,
-        `对话 #${thread.localNumber} 模型设置`,
+        fallbackText,
         "group",
         route.topicRootId,
       );
     } else {
-      this.replyCard(
-        route.chatId,
-        card,
-        `对话 #${thread.localNumber} 模型设置`,
-        "group",
-        route.topicRootId,
-      );
+      this.replyCard(route.chatId, card, fallbackText, "group", route.topicRootId);
     }
     await this.drainDeliveries();
+    const persistedMessageId = database.getLatestSentCardMessageId({
+      chatId: route.chatId,
+      body: fallbackText,
+      audience: "group",
+    });
+    if (persistedMessageId) {
+      database.setFeishuThreadToolbarMessage(threadId, persistedMessageId);
+    }
   }
 
   private async assertAndShowConversationToolbar(

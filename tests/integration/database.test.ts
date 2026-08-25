@@ -453,7 +453,13 @@ describe("project and thread persistence", () => {
         topicRootId: "omt_topic_1",
         ownerOpenId: "ou_owner",
       });
-      expect(route).toMatchObject({ threadId: "thread-1", topicRootId: "omt_topic_1" });
+      expect(route).toMatchObject({
+        threadId: "thread-1",
+        topicRootId: "omt_topic_1",
+        toolbarMessageId: null,
+      });
+      expect(database.setFeishuThreadToolbarMessage("thread-1", "om_toolbar_1")).toBe(true);
+      expect(database.getFeishuThreadRoute("thread-1")?.toolbarMessageId).toBe("om_toolbar_1");
       expect(database.resolveFeishuThreadRoute("oc_demo", "omt_topic_1")?.threadId).toBe(
         "thread-1",
       );
