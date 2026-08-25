@@ -1,16 +1,21 @@
 {
   "scopes": {
     "tenant": [
-      "cardkit:card:read",
       "cardkit:card:write",
-      "im:chat.members:bot_access",
+      "im:chat.members:read",
+      "im:chat.members:write_only",
       "im:chat:create",
-      "im:chat:read",
+      "im:chat:delete",
+      "im:chat:operate_as_owner",
+      "im:chat:readonly",
       "im:chat:update",
+      "im:message",
+      "im:message.group_at_msg.include_bot:readonly",
+      "im:message.group_at_msg:readonly",
+      "im:message.group_msg",
+      "im:message.group_msg.include_bot:read",
       "im:message.p2p_msg:readonly",
-      "im:message:readonly",
       "im:message:send_as_bot",
-      "im:message:update",
       "im:resource"
     ],
     "user": []

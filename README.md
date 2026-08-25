@@ -87,7 +87,7 @@ Open ID 输入框旁的“如何获取？”包含两种流程：已安装飞书
 请严格按 [飞书开放平台配置清单](docs/FEISHU_SETUP.md) 操作。最容易遗漏的是：
 
 1. 企业自建应用必须启用机器人能力，并只向实际操作者开放。
-2. 在权限管理中批量导入 [ClawBridge 最小应用权限](docs/feishu-permissions.json)；权限用途、租户差异和错误补充见[飞书配置清单](docs/FEISHU_SETUP.md)。
+2. 在权限管理中批量导入 [ClawBridge 已验证应用权限](docs/feishu-permissions.json)；权限用途、租户差异和错误补充见[飞书配置清单](docs/FEISHU_SETUP.md)。
 3. 事件配置使用长连接并添加 `im.message.receive_v1`。
 4. 回调配置也使用长连接并添加 `card.action.trigger`。
 5. 每次修改权限、事件或回调后都要创建并发布新版本。
