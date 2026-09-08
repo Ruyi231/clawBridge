@@ -522,6 +522,43 @@ export class FeishuAdapter implements ChannelAdapter {
     );
   }
 
+  private async prepareOutputArtifacts(artifacts: LocalOutputArtifact[] | undefined): Promise<{
+    views: ConversationArtifactView[];
+    files: Array<{ artifact: LocalOutputArtifact; fileKey: string; viewIndex: number }>;
+  }> {
+    const views: ConversationArtifactView[] = [];
+    const files: Array<{ artifact: LocalOutputArtifact; fileKey: string; viewIndex: number }> = [];
+    for (const artifact of artifacts ?? []) {
+      if (artifact.type === "image" && artifact.size <= 10 * 1024 * 1024) {
+        try {
+          views.push({
+            name: artifact.name,
+            type: "image",
+            imageKey: await this.uploadImage(artifact.path),
+            delivery: "embedded",
+          });
+          continue;
+        } catch (error) {
+          this.logger.warn({ err: error, path: artifact.path }, "Feishu image upload failed");
+        }
+      }
+      try {
+        const fileKey = await this.uploadFile(artifact);
+        const viewIndex =
+          views.push({
+            name: artifact.name,
+            type: artifact.type,
+            delivery: "attachment",
+          }) - 1;
+        files.push({ artifact, fileKey, viewIndex });
+      } catch (error) {
+        this.logger.warn({ err: error, path: artifact.path }, "Feishu artifact upload failed");
+        views.push({ name: artifact.name, type: artifact.type, delivery: "failed" });
+      }
+    }
+    return { views, files };
+  }
+
   async createProjectSpace(input: {
     projectId: string;
     projectName: string;
@@ -732,7 +769,7 @@ export class FeishuAdapter implements ChannelAdapter {
       : [{ kind: "text", text: "—— 新的对话 ——\n可直接发送 Codex 任务。" }];
     let topicRootId = rootMessageId;
     for (const [index, reply] of replies.entries()) {
-      const historyCardId =
+      const historyCard =
         reply.kind === "history" ? await this.createHistoryCard(reply.turn) : undefined;
       let response: Awaited<ReturnType<typeof this.client.im.message.reply>> | undefined;
       let lastError: unknown;
@@ -748,7 +785,7 @@ export class FeishuAdapter implements ChannelAdapter {
                       msg_type: "interactive" as const,
                       content: JSON.stringify({
                         type: "card",
-                        data: { card_id: historyCardId },
+                        data: { card_id: historyCard?.cardId },
                       }),
                       reply_in_thread: true,
                       uuid: `clawbridge-msg-${createHash("sha256")
@@ -777,13 +814,67 @@ export class FeishuAdapter implements ChannelAdapter {
         throw new Error(`Feishu create project topic failed: ${response.msg ?? response.code}`);
       }
       topicRootId = response.data?.root_id ?? topicRootId;
+      if (reply.kind === "history" && historyCard?.files.length) {
+        let changed = false;
+        for (const file of historyCard.files) {
+          try {
+            await this.sendUploadedFile({
+              chatId: input.chatId,
+              replyToMessageId: rootMessageId,
+              fileKey: file.fileKey,
+            });
+          } catch (error) {
+            changed = true;
+            historyCard.turn.artifacts![file.viewIndex] = {
+              name: file.artifact.name,
+              type: file.artifact.type,
+              delivery: "failed",
+            };
+            this.logger.warn(
+              { err: error, path: file.artifact.path },
+              "Feishu historical artifact send failed",
+            );
+          }
+        }
+        if (changed) {
+          const updated = await this.client.cardkit.v1.card.update({
+            path: { card_id: historyCard.cardId },
+            data: {
+              card: {
+                type: "card_json",
+                data: JSON.stringify(createConversationTurnCard(historyCard.turn)),
+              },
+              sequence: 1,
+              uuid: `history-artifacts-${historyCard.cardId}`,
+            },
+          });
+          if (updated.code !== 0) {
+            this.logger.warn(
+              { code: updated.code, msg: updated.msg },
+              "Feishu historical artifact status update failed",
+            );
+          }
+        }
+      }
       if (index + 1 < replies.length) await this.wait(25);
     }
     return { topicRootId };
   }
 
-  private async createHistoryCard(turn: ConversationTurnView): Promise<string> {
-    const card = createConversationTurnCard(turn);
+  private async createHistoryCard(turn: ConversationTurnView): Promise<{
+    cardId: string;
+    turn: ConversationTurnView;
+    files: Array<{ artifact: LocalOutputArtifact; fileKey: string; viewIndex: number }>;
+  }> {
+    const attachments = await this.prepareAttachmentPreviews(turn.attachments);
+    const prepared = await this.prepareOutputArtifacts(turn.localArtifacts);
+    const renderedTurn: ConversationTurnView = {
+      ...turn,
+      ...(attachments ? { attachments } : {}),
+      ...(prepared.views.length ? { artifacts: prepared.views } : {}),
+    };
+    delete renderedTurn.localArtifacts;
+    const card = createConversationTurnCard(renderedTurn);
     const created = await this.client.cardkit.v1.card.create({
       data: { type: "card_json", data: JSON.stringify(card) },
     });
@@ -791,7 +882,7 @@ export class FeishuAdapter implements ChannelAdapter {
     if (created.code !== 0 || !cardId) {
       throw new Error(`Feishu history card create failed: ${created.msg ?? created.code}`);
     }
-    return cardId;
+    return { cardId, turn: renderedTurn, files: prepared.files };
   }
 
   async startTaskStream(input: {
@@ -869,39 +960,28 @@ export class FeishuAdapter implements ChannelAdapter {
     const stream = this.streamSequences.get(streamId);
     if (!stream) return;
     try {
-      const artifacts: ConversationArtifactView[] = [];
-      for (const artifact of input.artifacts ?? []) {
-        if (artifact.type === "image" && artifact.size <= 10 * 1024 * 1024) {
-          try {
-            artifacts.push({
-              name: artifact.name,
-              type: "image",
-              imageKey: await this.uploadImage(artifact.path),
-              delivery: "embedded",
-            });
-            continue;
-          } catch (error) {
-            this.logger.warn({ err: error, path: artifact.path }, "Feishu image upload failed");
-          }
-        }
+      const prepared = await this.prepareOutputArtifacts(input.artifacts);
+      for (const file of prepared.files) {
         try {
-          const fileKey = await this.uploadFile(artifact);
           await this.sendUploadedFile({
             chatId: stream.chatId,
             ...(stream.replyToMessageId ? { replyToMessageId: stream.replyToMessageId } : {}),
-            fileKey,
+            fileKey: file.fileKey,
           });
-          artifacts.push({ name: artifact.name, type: artifact.type, delivery: "attachment" });
         } catch (error) {
-          this.logger.warn({ err: error, path: artifact.path }, "Feishu artifact upload failed");
-          artifacts.push({ name: artifact.name, type: artifact.type, delivery: "failed" });
+          prepared.views[file.viewIndex] = {
+            name: file.artifact.name,
+            type: file.artifact.type,
+            delivery: "failed",
+          };
+          this.logger.warn({ err: error, path: file.artifact.path }, "Feishu artifact send failed");
         }
       }
       const finalCard = createConversationTurnCard({
         ...stream.turn,
         title: input.summary,
         assistantText: input.finalText,
-        ...(artifacts.length ? { artifacts } : {}),
+        ...(prepared.views.length ? { artifacts: prepared.views } : {}),
       });
       const sequence = ++stream.sequence;
       const response = await this.client.cardkit.v1.card.update({

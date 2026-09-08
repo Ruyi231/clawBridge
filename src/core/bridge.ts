@@ -1386,7 +1386,7 @@ export class Bridge {
           if (thread.threadId !== options?.skipHistoryForThreadId) {
             const details = await this.dependencies.codex.readThreadDetails(thread.threadId, true);
             await this.validateThreadProject(details, projectRoot, project.id);
-            historyTurns = this.renderTopicHistory(details);
+            historyTurns = await this.renderTopicHistory(details, projectRoot);
           }
         } catch (error) {
           if (!this.isMissingRolloutError(error)) throw error;
@@ -2094,16 +2094,31 @@ export class Bridge {
     });
   }
 
-  private renderTopicHistory(details: CodexThreadDetails): ConversationTurnView[] {
+  private async renderTopicHistory(
+    details: CodexThreadDetails,
+    projectRoot: string,
+  ): Promise<ConversationTurnView[]> {
     const taskByTurnId = new Map(
       this.dependencies.database
         .listTasksForThread(details.id)
         .filter((task) => task.codexTurnId)
         .map((task) => [task.codexTurnId!, task]),
     );
-    return this.conversationTurns(details).map((turn, index) => {
+    const views: ConversationTurnView[] = [];
+    for (const [index, turn] of this.conversationTurns(details).entries()) {
       const task = taskByTurnId.get(turn.turnId);
-      return {
+      const localArtifacts = this.dependencies.config.bridge.outputArtifacts.enabled
+        ? await collectLinkedOutputArtifacts({
+            markdown: turn.assistantText,
+            projectRoot,
+            maxFiles: this.dependencies.config.bridge.outputArtifacts.maxFiles,
+            maxBytes: Math.min(
+              this.dependencies.config.bridge.attachmentMaxBytes,
+              30 * 1024 * 1024,
+            ),
+          })
+        : [];
+      views.push({
         title: `第 ${index + 1} 轮`,
         userText: turn.userText,
         assistantText: turn.assistantText,
@@ -2116,8 +2131,10 @@ export class Bridge {
               })),
             }
           : {}),
-      };
-    });
+        ...(localArtifacts.length ? { localArtifacts } : {}),
+      });
+    }
+    return views;
   }
 
   private async runChatClose(chatId: string): Promise<void> {

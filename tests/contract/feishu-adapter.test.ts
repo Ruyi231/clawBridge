@@ -790,6 +790,54 @@ describe("Feishu adapter card contract", () => {
     expect(content).not.toContain("![运行截图]");
   });
 
+  it("restores historical Codex images and files into the rebuilt topic", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+    const directory = await mkdtemp(path.join(tmpdir(), "clawbridge-history-output-"));
+    const imagePath = path.join(directory, "history.png");
+    const filePath = path.join(directory, "history.pdf");
+    await writeFile(imagePath, "image");
+    await writeFile(filePath, "report");
+
+    try {
+      await adapter.createProjectTopic({
+        chatId: "oc-project-1",
+        title: "恢复产物",
+        idempotencyKey: "thread-history-output",
+        historyTurns: [
+          {
+            title: "第 1 轮",
+            userText: "生成产物",
+            assistantText: "已生成历史产物。",
+            localArtifacts: [
+              { path: imagePath, name: "history.png", type: "image", size: 5 },
+              { path: filePath, name: "history.pdf", type: "file", size: 6 },
+            ],
+          },
+        ],
+      });
+
+      const request = larkMocks.createCard.mock.calls.at(-1)?.[0] as {
+        data: { data: string };
+      };
+      const card = JSON.parse(request.data.data);
+      expect(JSON.stringify(card)).toContain('"img_key":"img-uploaded-1"');
+      expect(JSON.stringify(card)).toContain("history.pdf · 已发送为下方附件");
+      expect(larkMocks.replyMessage).toHaveBeenCalledWith({
+        path: { message_id: "om-sent-1" },
+        data: {
+          msg_type: "file",
+          content: JSON.stringify({ file_key: "file-uploaded-1" }),
+          reply_in_thread: true,
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("creates, updates, and finalizes a CardKit task stream inside a topic", async () => {
     const adapter = new FeishuAdapter(
       { appId: "cli-test", appSecret: "secret" },

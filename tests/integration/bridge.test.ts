@@ -1681,7 +1681,11 @@ describe("Bridge vertical slice", () => {
           messages: [
             { role: "user", text: "历史问题", phase: null },
             { role: "assistant", text: "中间过程不应恢复", phase: "commentary" },
-            { role: "assistant", text: "历史答案", phase: "final_answer" },
+            {
+              role: "assistant",
+              text: `历史答案 [package](<${path.join(process.cwd(), "package.json")}>)`,
+              phase: "final_answer",
+            },
           ],
         },
         {
@@ -1773,8 +1777,11 @@ describe("Bridge vertical slice", () => {
     expect(historyTurns[0]).toMatchObject({
       title: "第 1 轮",
       userText: "历史问题",
-      assistantText: "历史答案",
+      assistantText: expect.stringContaining("历史答案"),
       attachments: [{ name: "现场照片.jpg", type: "image" }],
+      localArtifacts: [
+        expect.objectContaining({ name: "package.json", type: "file", path: expect.any(String) }),
+      ],
     });
     expect(JSON.stringify(historyTurns)).not.toContain("中间过程不应恢复");
     expect(historyTurns[1]?.assistantText).toBe("答案上半段\n\n答案下半段");

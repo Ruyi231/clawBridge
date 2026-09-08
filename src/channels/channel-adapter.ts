@@ -23,6 +23,8 @@ export interface ConversationTurnView {
   assistantText: string;
   attachments?: ConversationAttachmentView[];
   artifacts?: ConversationArtifactView[];
+  /** Project-local Codex outputs to re-upload when rebuilding historical turns. */
+  localArtifacts?: LocalOutputArtifact[];
 }
 
 export interface ChannelAdapter {
