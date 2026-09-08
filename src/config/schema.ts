@@ -27,6 +27,12 @@ export const bridgeConfigSchema = z.object({
       .min(1_024)
       .max(100 * 1024 * 1024)
       .default(20 * 1024 * 1024),
+    outputArtifacts: z
+      .object({
+        enabled: z.boolean().default(true),
+        maxFiles: z.number().int().min(1).max(20).default(10),
+      })
+      .default({ enabled: true, maxFiles: 10 }),
   }),
   feishu: z.object({
     appIdEnv: envName,

@@ -1,7 +1,16 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import path from "node:path";
 import type { Logger } from "pino";
-import type { ChannelAdapter, ConversationTurnView } from "./channel-adapter.js";
+import type {
+  ChannelAdapter,
+  ConversationArtifactView,
+  ConversationAttachmentView,
+  ConversationTurnView,
+} from "./channel-adapter.js";
+import type { LocalOutputArtifact } from "../core/output-artifacts.js";
 import {
   createConversationTurnCard,
   renderAssistantCardMarkdown,
@@ -166,7 +175,16 @@ export class FeishuAdapter implements ChannelAdapter {
   private hasConnected = false;
   private stopped = false;
   private fatalErrorHandler: ((error: Error) => void) | undefined;
-  private readonly streamSequences = new Map<string, { elementId: string; sequence: number }>();
+  private readonly streamSequences = new Map<
+    string,
+    {
+      elementId: string;
+      sequence: number;
+      turn: ConversationTurnView;
+      chatId: string;
+      replyToMessageId?: string;
+    }
+  >();
 
   constructor(
     credentials: { appId: string; appSecret: string },
@@ -415,6 +433,93 @@ export class FeishuAdapter implements ChannelAdapter {
       );
       throw new Error("Attachment exceeds configured size limit");
     }
+  }
+
+  private async uploadImage(localPath: string): Promise<string> {
+    const metadata = await stat(localPath);
+    if (!metadata.isFile() || metadata.size === 0 || metadata.size > 10 * 1024 * 1024) {
+      throw new Error("图片必须为不超过 10 MB 的非空文件");
+    }
+    const response = await this.callApi("上传飞书图片", () =>
+      this.client.im.image.create({
+        data: { image_type: "message", image: createReadStream(localPath) },
+      }),
+    );
+    const imageKey = response?.image_key;
+    if (!imageKey) throw new Error("上传飞书图片失败：响应缺少 image_key");
+    return imageKey;
+  }
+
+  private fileType(localPath: string): "pdf" | "doc" | "xls" | "ppt" | "mp4" | "stream" {
+    const extension = path.extname(localPath).toLowerCase();
+    if (extension === ".pdf") return "pdf";
+    if ([".doc", ".docx"].includes(extension)) return "doc";
+    if ([".xls", ".xlsx", ".csv"].includes(extension)) return "xls";
+    if ([".ppt", ".pptx"].includes(extension)) return "ppt";
+    if ([".mp4", ".mov", ".avi", ".mkv"].includes(extension)) return "mp4";
+    return "stream";
+  }
+
+  private async uploadFile(artifact: LocalOutputArtifact): Promise<string> {
+    if (artifact.size === 0 || artifact.size > 30 * 1024 * 1024) {
+      throw new Error("文件必须为不超过 30 MB 的非空文件");
+    }
+    const response = await this.callApi("上传飞书文件", () =>
+      this.client.im.file.create({
+        data: {
+          file_type: this.fileType(artifact.path),
+          file_name: artifact.name.slice(0, 255),
+          file: createReadStream(artifact.path),
+        },
+      }),
+    );
+    const fileKey = response?.file_key;
+    if (!fileKey) throw new Error("上传飞书文件失败：响应缺少 file_key");
+    return fileKey;
+  }
+
+  private async sendUploadedFile(input: {
+    chatId: string;
+    replyToMessageId?: string;
+    fileKey: string;
+  }): Promise<void> {
+    const content = JSON.stringify({ file_key: input.fileKey });
+    const response = input.replyToMessageId
+      ? await this.client.im.message.reply({
+          path: { message_id: input.replyToMessageId },
+          data: { msg_type: "file", content, reply_in_thread: true },
+        })
+      : await this.client.im.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: { receive_id: input.chatId, msg_type: "file", content },
+        });
+    if (response.code !== 0 || !response.data?.message_id) {
+      throw new Error(
+        `发送飞书文件失败：${response.msg ?? response.code ?? "响应缺少 message_id"}`,
+      );
+    }
+  }
+
+  private async prepareAttachmentPreviews(
+    attachments: ConversationAttachmentView[] | undefined,
+  ): Promise<ConversationAttachmentView[] | undefined> {
+    if (!attachments?.length) return undefined;
+    return Promise.all(
+      attachments.map(async (attachment) => {
+        if (attachment.type !== "image" || attachment.imageKey || !attachment.localPath) {
+          return attachment;
+        }
+        try {
+          return { ...attachment, imageKey: await this.uploadImage(attachment.localPath) };
+        } catch (error) {
+          this.logger.warn(
+            { err: error, attachmentName: attachment.name },
+            "Feishu input image preview is unavailable",
+          );
+          return attachment;
+        }
+      }),
+    );
   }
 
   async createProjectSpace(input: {
@@ -695,18 +800,20 @@ export class FeishuAdapter implements ChannelAdapter {
     title: string;
     userText: string;
     assistantText: string;
-    attachments?: Array<{ name: string; type: "image" | "file" }>;
+    attachments?: ConversationAttachmentView[];
   }): Promise<{ streamId: string; messageId: string }> {
     const elementId = "task_stream_content";
-    const card = createConversationTurnCard(
-      {
-        title: input.title,
-        userText: input.userText,
-        assistantText: input.assistantText,
-        ...(input.attachments ? { attachments: input.attachments } : {}),
-      },
-      { streaming: true, assistantElementId: elementId },
-    );
+    const preparedAttachments = await this.prepareAttachmentPreviews(input.attachments);
+    const turn: ConversationTurnView = {
+      title: input.title,
+      userText: input.userText,
+      assistantText: input.assistantText,
+      ...(preparedAttachments ? { attachments: preparedAttachments } : {}),
+    };
+    const card = createConversationTurnCard(turn, {
+      streaming: true,
+      assistantElementId: elementId,
+    });
     const created = await this.client.cardkit.v1.card.create({
       data: { type: "card_json", data: JSON.stringify(card) },
     });
@@ -728,7 +835,13 @@ export class FeishuAdapter implements ChannelAdapter {
     if (sent.code !== 0 || !messageId) {
       throw new Error(`Feishu stream card send failed: ${sent.msg ?? sent.code}`);
     }
-    this.streamSequences.set(cardId, { elementId, sequence: 0 });
+    this.streamSequences.set(cardId, {
+      elementId,
+      sequence: 0,
+      turn,
+      chatId: input.chatId,
+      ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
+    });
     return { streamId: cardId, messageId };
   }
 
@@ -749,23 +862,58 @@ export class FeishuAdapter implements ChannelAdapter {
     }
   }
 
-  async finishTaskStream(streamId: string, summary: string): Promise<void> {
+  async finishTaskStream(
+    streamId: string,
+    input: { summary: string; finalText: string; artifacts?: LocalOutputArtifact[] },
+  ): Promise<void> {
     const stream = this.streamSequences.get(streamId);
     if (!stream) return;
-    const sequence = ++stream.sequence;
     try {
-      const response = await this.client.cardkit.v1.card.settings({
+      const artifacts: ConversationArtifactView[] = [];
+      for (const artifact of input.artifacts ?? []) {
+        if (artifact.type === "image" && artifact.size <= 10 * 1024 * 1024) {
+          try {
+            artifacts.push({
+              name: artifact.name,
+              type: "image",
+              imageKey: await this.uploadImage(artifact.path),
+              delivery: "embedded",
+            });
+            continue;
+          } catch (error) {
+            this.logger.warn({ err: error, path: artifact.path }, "Feishu image upload failed");
+          }
+        }
+        try {
+          const fileKey = await this.uploadFile(artifact);
+          await this.sendUploadedFile({
+            chatId: stream.chatId,
+            ...(stream.replyToMessageId ? { replyToMessageId: stream.replyToMessageId } : {}),
+            fileKey,
+          });
+          artifacts.push({ name: artifact.name, type: artifact.type, delivery: "attachment" });
+        } catch (error) {
+          this.logger.warn({ err: error, path: artifact.path }, "Feishu artifact upload failed");
+          artifacts.push({ name: artifact.name, type: artifact.type, delivery: "failed" });
+        }
+      }
+      const finalCard = createConversationTurnCard({
+        ...stream.turn,
+        title: input.summary,
+        assistantText: input.finalText,
+        ...(artifacts.length ? { artifacts } : {}),
+      });
+      const sequence = ++stream.sequence;
+      const response = await this.client.cardkit.v1.card.update({
         path: { card_id: streamId },
         data: {
-          settings: JSON.stringify({
-            config: { streaming_mode: false, summary: { content: summary.slice(0, 100) } },
-          }),
+          card: { type: "card_json", data: JSON.stringify(finalCard) },
           sequence,
           uuid: `finish-${streamId}-${sequence}`,
         },
       });
       if (response.code !== 0) {
-        throw new Error(`Feishu task stream finish failed: ${response.msg ?? response.code}`);
+        throw new Error(`Feishu task stream final update failed: ${response.msg ?? response.code}`);
       }
     } finally {
       this.streamSequences.delete(streamId);

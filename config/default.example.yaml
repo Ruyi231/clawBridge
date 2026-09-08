@@ -6,6 +6,11 @@ bridge:
   deliveryRetryBaseMs: 1000
   attachmentDirectory: ./data/attachments
   attachmentMaxBytes: 20971520
+  # Upload project-local files that Codex explicitly links in its final answer.
+  # Images are embedded in the answer card; other files are sent as attachments.
+  outputArtifacts:
+    enabled: true
+    maxFiles: 10
 
 feishu:
   appIdEnv: CLAWBRIDGE_FEISHU_APP_ID

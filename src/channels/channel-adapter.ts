@@ -1,10 +1,28 @@
 import type { InboundEvent, OutboundMessage } from "../core/types.js";
+import type { LocalOutputArtifact } from "../core/output-artifacts.js";
+
+export interface ConversationAttachmentView {
+  name: string;
+  type: "image" | "file";
+  /** Existing Feishu image key, used for an inline preview without re-uploading. */
+  imageKey?: string;
+  /** Composer-downloaded image that the adapter may upload for preview. */
+  localPath?: string;
+}
+
+export interface ConversationArtifactView {
+  name: string;
+  type: "image" | "file";
+  imageKey?: string;
+  delivery: "embedded" | "attachment" | "failed";
+}
 
 export interface ConversationTurnView {
   title: string;
   userText: string;
   assistantText: string;
-  attachments?: Array<{ name: string; type: "image" | "file" }>;
+  attachments?: ConversationAttachmentView[];
+  artifacts?: ConversationArtifactView[];
 }
 
 export interface ChannelAdapter {
@@ -44,10 +62,17 @@ export interface ChannelAdapter {
     title: string;
     userText: string;
     assistantText: string;
-    attachments?: Array<{ name: string; type: "image" | "file" }>;
+    attachments?: ConversationAttachmentView[];
   }): Promise<{ streamId: string; messageId: string }>;
   updateTaskStream?(streamId: string, content: string): Promise<void>;
-  finishTaskStream?(streamId: string, summary: string): Promise<void>;
+  finishTaskStream?(
+    streamId: string,
+    input: {
+      summary: string;
+      finalText: string;
+      artifacts?: LocalOutputArtifact[];
+    },
+  ): Promise<void>;
   downloadAttachment?(input: {
     messageId: string;
     fileKey: string;

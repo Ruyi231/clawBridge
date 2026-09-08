@@ -195,6 +195,7 @@ const config: BridgeConfig = {
     deliveryRetryBaseMs: 10,
     attachmentDirectory: "./data/attachments-test",
     attachmentMaxBytes: 1024 * 1024,
+    outputArtifacts: { enabled: true, maxFiles: 10 },
   },
   feishu: {
     appIdEnv: "APP_ID",
@@ -619,7 +620,7 @@ describe("Bridge vertical slice", () => {
         expect.objectContaining({
           userText: "一起分析",
           attachments: [
-            { name: "photo.png", type: "image" },
+            { name: "photo.png", type: "image", localPath: imagePath },
             { name: "notes.md", type: "file" },
           ],
         }),
@@ -704,8 +705,55 @@ describe("Bridge vertical slice", () => {
     await vi.waitFor(() => expect(database.listTasks({ limit: 1 })[0]?.state).toBe("completed"));
 
     expect(channel.updateTaskStream).toHaveBeenLastCalledWith("stream-task-1", "done");
-    expect(channel.finishTaskStream).toHaveBeenCalledWith("stream-task-1", "Demo · 已完成");
+    expect(channel.finishTaskStream).toHaveBeenCalledWith("stream-task-1", {
+      summary: "Demo · 已完成",
+      finalText: "done",
+    });
     expect(channel.sent.some((message) => message.text.includes("✅ completed"))).toBe(false);
+  });
+
+  it("passes only explicitly linked project-local outputs to the Feishu stream finalizer", async () => {
+    const channel = new FakeChannel({ streaming: true });
+    const codex = fakeCodex();
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "clawbridge-project-output-"));
+    const outputPath = path.join(projectRoot, "result.png");
+    writeFileSync(outputPath, "image");
+    vi.mocked(codex.runTurn).mockImplementationOnce(async (input) => {
+      input.onStarted?.({ threadId: "thread-bridge", turnId: "turn-bridge" });
+      return {
+        threadId: "thread-bridge",
+        turnId: "turn-bridge",
+        finalText: `已生成。![结果](<${outputPath}>)`,
+      };
+    });
+    const database = new BridgeDatabase(":memory:");
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: projectRoot, enabled: true }],
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    try {
+      await bridge.start();
+      await channel.receive("生成图片", "stream-output");
+      await vi.waitFor(() => expect(database.listTasks({ limit: 1 })[0]?.state).toBe("completed"));
+
+      expect(channel.finishTaskStream).toHaveBeenCalledWith(
+        "stream-task-1",
+        expect.objectContaining({
+          finalText: expect.stringContaining("result.png"),
+          artifacts: [
+            expect.objectContaining({ path: outputPath, name: "result.png", type: "image" }),
+          ],
+        }),
+      );
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
 
   it("falls back to a normal final reply when finalizing the stream fails", async () => {

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { collectLinkedOutputArtifacts } from "./output-artifacts.js";
 import { copyFile, mkdir, rm, stat } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import type { Logger } from "pino";
@@ -537,7 +538,12 @@ export class Bridge {
             title: `${project.name} · 对话轮次`,
             userText: task.prompt,
             assistantText: "正在连接 Codex…",
-            attachments: task.attachments.map(({ name, type }) => ({ name, type })),
+            attachments: task.attachments.map(({ name, type, source, key, localPath }) => ({
+              name,
+              type,
+              ...(type === "image" && source !== "local" ? { imageKey: key } : {}),
+              ...(type === "image" && source === "local" && localPath ? { localPath } : {}),
+            })),
           });
           streamId = stream.streamId;
           streamPump = new TaskStreamPump(
@@ -682,9 +688,21 @@ export class Bridge {
       });
       let streamFinalized = false;
       try {
+        const artifacts = config.bridge.outputArtifacts.enabled
+          ? await collectLinkedOutputArtifacts({
+              markdown: result.finalText,
+              projectRoot: cwd,
+              maxFiles: config.bridge.outputArtifacts.maxFiles,
+              maxBytes: Math.min(config.bridge.attachmentMaxBytes, 30 * 1024 * 1024),
+            })
+          : [];
         await streamPump?.close(result.finalText);
         if (streamId && channel.finishTaskStream) {
-          await channel.finishTaskStream(streamId, `${project.name} · 已完成`);
+          await channel.finishTaskStream(streamId, {
+            summary: `${project.name} · 已完成`,
+            finalText: result.finalText,
+            ...(artifacts.length ? { artifacts } : {}),
+          });
           streamFinalized = true;
         }
       } catch (streamError) {
@@ -731,7 +749,10 @@ export class Bridge {
       try {
         await streamPump?.close(`任务结束：${detail}`);
         if (streamId && channel.finishTaskStream) {
-          await channel.finishTaskStream(streamId, `${project.name} · 任务结束`);
+          await channel.finishTaskStream(streamId, {
+            summary: `${project.name} · 任务结束`,
+            finalText: `任务结束：${detail}`,
+          });
         }
       } catch (streamError) {
         logger.warn({ err: streamError, taskId: task.id }, "Failed to finalize task stream");
@@ -2088,7 +2109,11 @@ export class Bridge {
         assistantText: turn.assistantText,
         ...(task?.attachments.length
           ? {
-              attachments: task.attachments.map(({ name, type }) => ({ name, type })),
+              attachments: task.attachments.map(({ name, type, source, key }) => ({
+                name,
+                type,
+                ...(type === "image" && source !== "local" ? { imageKey: key } : {}),
+              })),
             }
           : {}),
       };

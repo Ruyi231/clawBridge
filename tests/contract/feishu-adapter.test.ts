@@ -18,8 +18,11 @@ const larkMocks = vi.hoisted(() => ({
   createChatMembers: vi.fn(),
   deleteChatMembers: vi.fn(),
   createCard: vi.fn(),
+  updateCard: vi.fn(),
   updateCardContent: vi.fn(),
   updateCardSettings: vi.fn(),
+  uploadImage: vi.fn(),
+  uploadFile: vi.fn(),
   wsStart: vi.fn(),
   wsClose: vi.fn(),
   handlers: {} as Record<string, (payload: unknown) => unknown>,
@@ -42,6 +45,8 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
       },
       v1: { message: { patch: larkMocks.patchMessage } },
       messageResource: { get: larkMocks.getMessageResource },
+      image: { create: larkMocks.uploadImage },
+      file: { create: larkMocks.uploadFile },
       chat: {
         create: larkMocks.createChat,
         get: larkMocks.getChat,
@@ -56,7 +61,11 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
     };
     readonly cardkit = {
       v1: {
-        card: { create: larkMocks.createCard, settings: larkMocks.updateCardSettings },
+        card: {
+          create: larkMocks.createCard,
+          update: larkMocks.updateCard,
+          settings: larkMocks.updateCardSettings,
+        },
         cardElement: { content: larkMocks.updateCardContent },
       },
     };
@@ -129,8 +138,11 @@ describe("Feishu adapter card contract", () => {
     larkMocks.updateChat.mockResolvedValue({ code: 0, data: {} });
     larkMocks.deleteChat.mockResolvedValue({ code: 0, data: {} });
     larkMocks.createCard.mockResolvedValue({ code: 0, data: { card_id: "card-stream-1" } });
+    larkMocks.updateCard.mockResolvedValue({ code: 0 });
     larkMocks.updateCardContent.mockResolvedValue({ code: 0 });
     larkMocks.updateCardSettings.mockResolvedValue({ code: 0 });
+    larkMocks.uploadImage.mockResolvedValue({ image_key: "img-uploaded-1" });
+    larkMocks.uploadFile.mockResolvedValue({ file_key: "file-uploaded-1" });
     larkMocks.wsStart.mockImplementation(() => {
       (larkMocks.wsOptions.onReady as (() => void) | undefined)?.();
     });
@@ -791,7 +803,7 @@ describe("Feishu adapter card contract", () => {
         title: "Demo · 任务运行中",
         userText: "分析这些材料",
         assistantText: "正在连接 Codex…",
-        attachments: [{ name: "截图.png", type: "image" }],
+        attachments: [{ name: "截图.png", type: "image", imageKey: "img-input-1" }],
       }),
     ).resolves.toEqual({ streamId: "card-stream-1", messageId: "om-reply-1" });
     const streamCardRequest = larkMocks.createCard.mock.calls.at(-1)?.[0] as {
@@ -801,6 +813,7 @@ describe("Feishu adapter card contract", () => {
       body: { elements: Array<{ tag: string; expanded?: boolean }> };
     };
     expect(JSON.stringify(streamCard)).toContain("**👤 用户**\\n分析这些材料");
+    expect(JSON.stringify(streamCard)).toContain('"img_key":"img-input-1"');
     expect(streamCard.body.elements).toContainEqual(
       expect.objectContaining({ tag: "collapsible_panel", expanded: false }),
     );
@@ -822,12 +835,41 @@ describe("Feishu adapter card contract", () => {
         uuid: "task-card-stream-1-1",
       },
     });
-    await adapter.finishTaskStream("card-stream-1", "Demo · 已完成");
-    expect(larkMocks.updateCardSettings).toHaveBeenCalledWith(
+    const directory = await mkdtemp(path.join(tmpdir(), "clawbridge-output-"));
+    const imagePath = path.join(directory, "result.png");
+    const filePath = path.join(directory, "report.pdf");
+    await writeFile(imagePath, "image");
+    await writeFile(filePath, "report");
+    await adapter.finishTaskStream("card-stream-1", {
+      summary: "Demo · 已完成",
+      finalText: "已生成结果。",
+      artifacts: [
+        { path: imagePath, name: "result.png", type: "image", size: 5 },
+        { path: filePath, name: "report.pdf", type: "file", size: 6 },
+      ],
+    });
+    await rm(directory, { recursive: true, force: true });
+    expect(larkMocks.uploadImage).toHaveBeenCalled();
+    expect(larkMocks.uploadFile).toHaveBeenCalled();
+    expect(larkMocks.replyMessage).toHaveBeenLastCalledWith({
+      path: { message_id: "om-topic-root" },
+      data: {
+        msg_type: "file",
+        content: JSON.stringify({ file_key: "file-uploaded-1" }),
+        reply_in_thread: true,
+      },
+    });
+    expect(larkMocks.updateCard).toHaveBeenCalledWith(
       expect.objectContaining({
         path: { card_id: "card-stream-1" },
         data: expect.objectContaining({ sequence: 2 }),
       }),
     );
+    const finalCardRequest = larkMocks.updateCard.mock.calls.at(-1)?.[0] as {
+      data: { card: { data: string } };
+    };
+    const finalCard = JSON.parse(finalCardRequest.data.card.data);
+    expect(JSON.stringify(finalCard)).toContain('"img_key":"img-uploaded-1"');
+    expect(JSON.stringify(finalCard)).toContain("report.pdf · 已发送为下方附件");
   });
 });
