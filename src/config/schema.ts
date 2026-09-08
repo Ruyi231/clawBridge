@@ -34,6 +34,72 @@ export const bridgeConfigSchema = z.object({
     allowedOpenIdEnv: envName,
     directMessagesOnly: z.boolean().default(true),
   }),
+  composer: z
+    .object({
+      enabled: z.boolean().default(false),
+      routingMode: z.enum(["sessionParam", "singleActive"]).default("sessionParam"),
+      formUrl: z.string().url().optional(),
+      appToken: z.string().min(1).optional(),
+      tableId: z.string().min(1).optional(),
+      pollIntervalMs: z
+        .number()
+        .int()
+        .min(1_000)
+        .max(5 * 60_000)
+        .default(5_000),
+      maxFiles: z.number().int().min(1).max(50).default(20),
+      tokenTtlMinutes: z
+        .number()
+        .int()
+        .min(1)
+        .max(24 * 60)
+        .default(30),
+      fields: z
+        .object({
+          session: z.string().min(1).default("ClawBridge会话"),
+          text: z.string().min(1).default("消息内容"),
+          attachments: z.string().min(1).default("附件"),
+          status: z.string().min(1).default("处理状态"),
+          error: z.string().min(1).default("错误信息"),
+        })
+        .default({
+          session: "ClawBridge会话",
+          text: "消息内容",
+          attachments: "附件",
+          status: "处理状态",
+          error: "错误信息",
+        }),
+      statuses: z
+        .object({
+          pending: z.string().min(1).default("待处理"),
+          processing: z.string().min(1).default("处理中"),
+          accepted: z.string().min(1).default("已接收"),
+          failed: z.string().min(1).default("失败"),
+        })
+        .default({ pending: "待处理", processing: "处理中", accepted: "已接收", failed: "失败" }),
+    })
+    .default({
+      enabled: false,
+      routingMode: "sessionParam",
+      pollIntervalMs: 5_000,
+      maxFiles: 20,
+      tokenTtlMinutes: 30,
+      fields: {
+        session: "ClawBridge会话",
+        text: "消息内容",
+        attachments: "附件",
+        status: "处理状态",
+        error: "错误信息",
+      },
+      statuses: { pending: "待处理", processing: "处理中", accepted: "已接收", failed: "失败" },
+    })
+    .refine(
+      (value) => !value.enabled || Boolean(value.formUrl && value.appToken && value.tableId),
+      {
+        message:
+          "composer.formUrl, appToken and tableId are required when composer.enabled is true",
+      },
+    ),
   codex: z.object({
     command: z.string().min(1).default("codex"),
     args: z.array(z.string()).default(["app-server"]),

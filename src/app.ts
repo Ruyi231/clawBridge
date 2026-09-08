@@ -8,6 +8,7 @@ import { ConsoleAdapter } from "./channels/console-adapter.js";
 import type { ChannelAdapter } from "./channels/channel-adapter.js";
 import { Bridge } from "./core/bridge.js";
 import { CodexDesktopProjectDiscovery } from "./projects/codex-desktop-project-discovery.js";
+import { BitableCloudComposer } from "./composer/bitable-cloud-composer.js";
 import { pathToFileURL } from "node:url";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -178,6 +179,29 @@ async function main(): Promise<void> {
         registerCreatedProjects: desktopProjectConfig.registerCreatedProjects,
       })
     : undefined;
+  const composerConfig = loaded.config.composer;
+  const composer = composerConfig.enabled
+    ? new BitableCloudComposer({
+        client: BitableCloudComposer.createClient({
+          appId: loaded.secrets.appId,
+          appSecret: loaded.secrets.appSecret,
+        }),
+        database,
+        logger,
+        ownerOpenId: loaded.secrets.allowedOpenId,
+        formUrl: composerConfig.formUrl!,
+        routingMode: composerConfig.routingMode,
+        appToken: composerConfig.appToken!,
+        tableId: composerConfig.tableId!,
+        pollIntervalMs: composerConfig.pollIntervalMs,
+        attachmentDirectory: loaded.config.bridge.attachmentDirectory,
+        attachmentMaxBytes: loaded.config.bridge.attachmentMaxBytes,
+        maxFiles: composerConfig.maxFiles,
+        tokenTtlMinutes: composerConfig.tokenTtlMinutes,
+        fields: composerConfig.fields,
+        statuses: composerConfig.statuses,
+      })
+    : undefined;
   codex.on("stderr", (message: string) =>
     logger.debug({ source: "codex", message }, "Codex stderr"),
   );
@@ -189,9 +213,11 @@ async function main(): Promise<void> {
     config: loaded.config,
     projects: loaded.projects,
     ...(desktopProjects ? { desktopProjects } : {}),
+    ...(composer ? { composer } : {}),
     allowedOpenId: loaded.secrets.allowedOpenId,
     logger,
   });
+  composer?.setSubmitHandler((message) => bridge.submitComposedTurn(message));
 
   let shutdownPromise: Promise<void> | undefined;
   let stopShutdownWatcher = () => {};
@@ -204,6 +230,7 @@ async function main(): Promise<void> {
       stopShutdownWatcher();
       logger.info({ signal }, "Stopping ClawBridge");
       try {
+        await composer?.stop();
         await bridge.stop();
       } finally {
         await Promise.allSettled([
@@ -227,6 +254,7 @@ async function main(): Promise<void> {
   stopShutdownWatcher = watchForShutdown(lifecycleFiles.shutdownFile, () => shutdown("manager"));
   try {
     await bridge.start();
+    await composer?.start();
     if (shutdownRequested) {
       await shutdownPromise;
       return;
@@ -238,6 +266,7 @@ async function main(): Promise<void> {
       return;
     }
   } catch (error) {
+    await composer?.stop().catch(() => {});
     await bridge.stop().catch(() => {});
     await removeLifecycleFile(lifecycleFiles.readyFile).catch(() => {});
     if (shutdownRequested) {

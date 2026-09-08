@@ -111,6 +111,24 @@ const actionSchemas = [
       page: cardPageSchema.optional(),
     })
     .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
+      action: z.literal("composer.open.thread"),
+      projectId: projectIdSchema,
+      threadId: threadIdSchema,
+      direct: z.literal(true).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(CARD_VERSION),
+      action: z.literal("composer.open.pending"),
+      projectId: projectIdSchema,
+      topicRootId: threadIdSchema,
+      direct: z.literal(true).optional(),
+    })
+    .strict(),
   z.object({ version: z.literal(CARD_VERSION), action: z.literal("task.stop") }).strict(),
   z.object({ version: z.literal(CARD_VERSION), action: z.literal("chat.close") }).strict(),
   z.object({ version: z.literal(CARD_VERSION), action: z.literal("project.create.show") }).strict(),
@@ -265,6 +283,8 @@ export interface ConversationToolbarCardInput {
   thread: CardThread;
   selectedModel?: string | null;
   selectedReasoningEffort?: string | null;
+  composerEnabled?: boolean;
+  composerUrl?: string;
 }
 
 export interface QuotaCardInput {
@@ -549,7 +569,7 @@ export function renderProjectSpaceCard(input: ProjectSpaceCardInput): FeishuCard
 }
 
 export function renderConversationToolbarCard(input: ConversationToolbarCardInput): FeishuCard {
-  return compactCard([
+  const elements: Array<Record<string, unknown>> = [
     {
       tag: "div",
       text: {
@@ -567,6 +587,54 @@ export function renderConversationToolbarCard(input: ConversationToolbarCardInpu
         "primary",
       ),
     },
+  ];
+  if (input.composerEnabled) {
+    const composerAction = action({
+      version: CARD_VERSION,
+      action: "composer.open.thread",
+      projectId: input.project.id,
+      threadId: input.thread.id,
+      ...(input.composerUrl ? { direct: true as const } : {}),
+    });
+    elements.push(
+      actionRow([
+        input.composerUrl
+          ? linkButton("组合发送", input.composerUrl, composerAction, "primary")
+          : button("组合发送", composerAction, "primary"),
+      ]),
+    );
+  }
+  return compactCard(elements);
+}
+
+export function renderComposerEntryCard(
+  projectId: string,
+  topicRootId: string,
+  composerUrl?: string,
+): FeishuCard {
+  const composerAction = action({
+    version: CARD_VERSION,
+    action: "composer.open.pending",
+    projectId,
+    topicRootId,
+    ...(composerUrl ? { direct: true as const } : {}),
+  });
+  return compactCard([
+    markdown("**发送新的对话轮次**\n一次选择多张图片和多个文件，并和文字一起提交。"),
+    actionRow([
+      composerUrl
+        ? linkButton("组合发送", composerUrl, composerAction, "primary")
+        : button("组合发送", composerAction, "primary"),
+    ]),
+  ]);
+}
+
+export function renderComposerLaunchCard(url: string): FeishuCard {
+  return compactCard([
+    markdown(
+      "**本次组合发送已绑定到当前话题**\n请打开表单并提交。再次从其他话题打开组合发送会使本次绑定失效。",
+    ),
+    actionRow([linkButton("打开飞书表单", url, undefined, "primary")]),
   ]);
 }
 

@@ -47,6 +47,24 @@ projectManagement:
 
 路径既可以写成 Windows 正斜杠形式（如 `D:/Work`），也可以使用 YAML 中正确转义的反斜杠。建议只配置专门存放代码的窄范围目录，不要配置磁盘根目录或用户主目录。
 
+若要在一轮中同时发送文字、多张图片和多个文件，可启用可选的组合发送页：
+
+```yaml
+composer:
+  enabled: true
+  routingMode: singleActive
+  formUrl: https://你的飞书多维表格表单分享地址
+  appToken: bascn_xxx
+  tableId: tbl_xxx
+  pollIntervalMs: 5000
+  maxFiles: 20
+  tokenTtlMinutes: 30
+```
+
+组合页和附件全部保存在飞书云端，不需要 Cloudflare Tunnel、公网域名、本机入站端口或飞书低代码平台。`singleActive` 模式直接使用多维表格的原生表单：在当前话题点击“组合发送”时，按钮会同时绑定当前话题并直接打开表单，不再发送中间跳转卡片。填写文字并上传多张图片/文件后一次提交即可。Bridge 每隔 `pollIntervalMs` 主动读取新记录，下载飞书云端附件并作为一个任务提交。处理状态依次为 `处理中 → 已接收`，失败时写为 `失败`。
+
+启用后，每个对话话题的模型工具卡会增加“组合发送”按钮，新对话话题也会收到入口卡。每轮回答完成后，Bridge 会撤回旧工具卡并在最新回答下方发送新工具卡。`singleActive` 只保留最近一次绑定；若先后从两个话题打开，下一次表单提交会进入后打开的话题，因此应点击后随即提交。需要多个话题同时打开表单时，可改用 `sessionParam` 和飞书低代码页面。应用需要租户权限 `bitable:app` 和 `drive:media:download`，并且必须被授予目标多维表格的读写访问权；修改权限后需要发布新版本。完整搭建步骤见 [飞书云端组合发送页](docs/FEISHU_CLOUD_COMPOSER.md)。
+
 每次换电脑、换 Windows 用户或修改项目配置后，都应构建并运行只读路径诊断：
 
 ```powershell
@@ -87,7 +105,7 @@ Open ID 输入框旁的“如何获取？”包含两种流程：已安装飞书
 请严格按 [飞书开放平台配置清单](docs/FEISHU_SETUP.md) 操作。最容易遗漏的是：
 
 1. 企业自建应用必须启用机器人能力，并只向实际操作者开放。
-2. 在权限管理中批量导入 [ClawBridge 已验证应用权限](docs/feishu-permissions.json)；权限用途、租户差异和错误补充见[飞书配置清单](docs/FEISHU_SETUP.md)。
+2. 在权限管理中批量导入 [ClawBridge 应用权限清单](docs/feishu-permissions.json)；权限用途、租户差异和错误补充见[飞书配置清单](docs/FEISHU_SETUP.md)。
 3. 事件配置使用长连接并添加 `im.message.receive_v1`。
 4. 回调配置也使用长连接并添加 `card.action.trigger`。
 5. 每次修改权限、事件或回调后都要创建并发布新版本。
@@ -134,7 +152,7 @@ Open ID 输入框旁的“如何获取？”包含两种流程：已安装飞书
 
 项目短期不用时可以在飞书客户端主动退出项目群。下次在机器人单聊中再次点击“项目群”，Bridge 会检查原群和成员状态：原群仍存在时自动重新邀请唯一授权用户，原有话题与 Codex 历史保持不变；原群已解散或群 ID 失效时重建群，并在用户再次进入各 Codex 对话时重建对应话题。自动重新邀请依赖上述三个群成员/群管理权限；修改权限后必须重新发布飞书应用版本。
 
-任务开始后，Bridge 会在原话题创建 CardKit 流式卡片，并把 Codex 的 `item/agentMessage/delta` 以约 400 ms 节流更新到同一张卡片；计划更新也会进入任务摘要。流式卡片创建或更新失败不会让 Codex 任务失败，最终文本仍通过持久 outbox 可靠发送。SQLite 会保存最近的增量正文与摘要，Bridge 重启后任务中心仍可查询。
+任务开始后，Bridge 会在原话题创建一张完整的 CardKit 轮次卡片：上方固定显示本轮用户文字与折叠式附件清单，下方显示 Codex 状态和回答。`item/agentMessage/delta` 以约 400 ms 节流原位更新到同一张卡片；完成时只冻结这张卡，不再另发一张结果卡。历史恢复复用同一个轮次卡片渲染器，并通过持久化的 Codex turn ID 找回该轮附件清单。流式卡片创建或更新失败不会让 Codex 任务失败，最终文本仍通过持久 outbox 可靠发送。SQLite 会保存最近的增量正文、最终正文与摘要，Bridge 重启后任务中心仍可查询。
 
 可以直接向机器人单聊或已登记的项目话题发送图片、文本、Markdown、JSON、YAML、CSV、日志、XML 或 PDF 文件。Bridge 会先将附件元数据和原飞书消息 ID 固化到任务快照，再按任务下载到 `bridge.attachmentDirectory` 下的隔离临时目录；图片通过 Codex `localImage` 输入提交，普通文档以明确的本机只读路径附加到任务说明。单个附件默认上限为 20 MiB，可用 `bridge.attachmentMaxBytes` 调整；任务结束后临时目录会自动删除。未知文件类型、超限文件或不支持附件下载的通道会安全失败，不会把飞书文件名当作本机路径使用。
 

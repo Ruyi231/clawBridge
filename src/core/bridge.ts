@@ -1,12 +1,14 @@
 import path from "node:path";
-import { mkdir, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, rm, stat } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import type { ChannelAdapter } from "../channels/channel-adapter.js";
+import type { ChannelAdapter, ConversationTurnView } from "../channels/channel-adapter.js";
 import {
   parseCardAction,
   renderApprovalCard,
   renderConversationToolbarCard,
+  renderComposerEntryCard,
+  renderComposerLaunchCard,
   renderHomeCard,
   renderModelListCard,
   renderProjectCreateCard,
@@ -30,6 +32,7 @@ import { renderFinalReply, splitMessage } from "../delivery/reply-renderer.js";
 import { TaskStreamPump } from "../delivery/task-stream-pump.js";
 import type { BridgeDatabase, ProjectRecord, ThreadIndexRecord } from "../persistence/database.js";
 import type { DesktopProjectSource } from "../projects/codex-desktop-project-discovery.js";
+import type { TurnComposer } from "../composer/bitable-cloud-composer.js";
 import { ProjectManager } from "../projects/project-manager.js";
 import { authorizeMessage } from "../security/authorization.js";
 import { areSameResolvedPath, resolveProjectPath } from "../security/path-policy.js";
@@ -110,6 +113,7 @@ export class Bridge {
       config: BridgeConfig;
       projects: ProjectConfig[];
       desktopProjects?: DesktopProjectSource;
+      composer?: TurnComposer;
       allowedOpenId: string;
       logger: Logger;
     },
@@ -131,6 +135,14 @@ export class Bridge {
     const start = this.startOnce();
     this.startPromise = start;
     return start;
+  }
+
+  async submitComposedTurn(message: InboundMessage): Promise<void> {
+    await this.onInboundEvent(message);
+    await this.messageTails.get(message.chatId);
+    if (!this.dependencies.database.getTaskByEventId(message.eventId)) {
+      throw new Error("当前对话未能接收该任务，请返回飞书查看提示后重试。");
+    }
   }
 
   private async startOnce(): Promise<void> {
@@ -498,6 +510,7 @@ export class Bridge {
     let streamId: string | undefined;
     let streamPump: TaskStreamPump | undefined;
     let attachmentDirectory: string | undefined;
+    const composedAttachmentDirectories = new Set<string>();
     if (threadId && !database.acquireLease(threadId, holder, config.codex.turnTimeoutMs + 30_000)) {
       database.updateTask(task.id, "failed", { error: "Thread is already leased" });
       this.reply(
@@ -521,8 +534,10 @@ export class Bridge {
           const stream = await channel.startTaskStream({
             chatId: task.chatId,
             replyToMessageId: task.replyToMessageId,
-            title: `${project.name} · 任务运行中`,
-            initialText: "正在连接 Codex…",
+            title: `${project.name} · 对话轮次`,
+            userText: task.prompt,
+            assistantText: "正在连接 Codex…",
+            attachments: task.attachments.map(({ name, type }) => ({ name, type })),
           });
           streamId = stream.streamId;
           streamPump = new TaskStreamPump(
@@ -538,10 +553,20 @@ export class Bridge {
       const inputs: import("../codex/protocol-types.js").CodexUserInput[] = [];
       const fileHints: string[] = [];
       if (task.attachments.length) {
-        if (!channel.downloadAttachment) throw new Error("当前消息通道不支持下载附件。 ");
         attachmentDirectory = path.resolve(config.bridge.attachmentDirectory, task.id);
         await mkdir(attachmentDirectory, { recursive: true });
         for (const [index, attachment] of task.attachments.entries()) {
+          let localSourcePath: string | undefined;
+          if (attachment.source === "local") {
+            if (!attachment.localPath) throw new Error("组合上传附件缺少本机暂存路径。");
+            const composerRoot = path.resolve(config.bridge.attachmentDirectory, "composer");
+            localSourcePath = path.resolve(attachment.localPath);
+            const relative = path.relative(composerRoot, localSourcePath);
+            if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+              throw new Error("组合上传附件路径无效。");
+            }
+            composedAttachmentDirectories.add(path.dirname(localSourcePath));
+          }
           const extension = path.extname(attachment.name).toLowerCase();
           const allowedFileExtensions = new Set([
             ".txt",
@@ -557,17 +582,27 @@ export class Bridge {
           if (attachment.type === "file" && !allowedFileExtensions.has(extension)) {
             throw new Error(`不支持附件类型 ${extension || "无扩展名"}。`);
           }
-          const safeName = `${index + 1}-${attachment.type === "image" ? "image.jpg" : `file${extension}`}`;
+          const imageExtension = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]).has(
+            extension,
+          )
+            ? extension
+            : ".jpg";
+          const safeName = `${index + 1}-${attachment.type === "image" ? `image${imageExtension}` : `file${extension}`}`;
           const targetPath = path.join(attachmentDirectory, safeName);
-          await channel.downloadAttachment({
-            messageId: task.messageId,
-            fileKey: attachment.key,
-            type: attachment.type,
-            targetPath,
-            maxBytes: config.bridge.attachmentMaxBytes,
-          });
+          if (localSourcePath) {
+            await copyFile(localSourcePath, targetPath);
+          } else {
+            if (!channel.downloadAttachment) throw new Error("当前消息通道不支持下载附件。 ");
+            await channel.downloadAttachment({
+              messageId: task.messageId,
+              fileKey: attachment.key,
+              type: attachment.type,
+              targetPath,
+              maxBytes: config.bridge.attachmentMaxBytes,
+            });
+          }
           if (attachment.type === "image") inputs.push({ type: "localImage", path: targetPath });
-          else fileHints.push(targetPath);
+          else fileHints.push(`${attachment.name}: ${targetPath}`);
         }
       }
       inputs.unshift({
@@ -595,7 +630,10 @@ export class Bridge {
             lastSyncedAt: new Date().toISOString(),
           });
           database.setThread(task.chatId, task.projectId, startedThreadId);
-          database.updateTask(task.id, "running", { threadId: startedThreadId });
+          database.updateTask(task.id, "running", {
+            threadId: startedThreadId,
+            codexTurnId: turnId,
+          });
           if (task.replyToMessageId) {
             const pendingTopic = database.resolveFeishuPendingTopic(
               task.chatId,
@@ -660,7 +698,11 @@ export class Bridge {
         lastSyncedAt: new Date().toISOString(),
       });
       database.setThread(task.chatId, task.projectId, result.threadId);
-      database.updateTask(task.id, "completed", { threadId: result.threadId });
+      database.updateTask(task.id, "completed", {
+        threadId: result.threadId,
+        codexTurnId: result.turnId,
+        finalText: result.finalText,
+      });
       if (!streamFinalized) {
         this.reply(
           task.chatId,
@@ -749,6 +791,9 @@ export class Bridge {
         this.pendingInteractions.delete(token);
       }
       if (attachmentDirectory) await rm(attachmentDirectory, { recursive: true, force: true });
+      for (const directory of composedAttachmentDirectories) {
+        await rm(directory, { recursive: true, force: true });
+      }
       if (activeThreadId && !this.stopping) {
         const released = await this.releaseThreadSubscription(activeThreadId, {
           context: "completed task",
@@ -936,6 +981,17 @@ export class Bridge {
           event.messageId,
         );
         await this.showConversationToolbar(action.projectId, action.threadId);
+        return;
+      case "composer.open.thread":
+        await this.openThreadComposer(event, action.projectId, action.threadId, action.direct);
+        return;
+      case "composer.open.pending":
+        await this.openPendingTopicComposer(
+          event,
+          action.projectId,
+          action.topicRootId,
+          action.direct,
+        );
         return;
       case "task.stop":
         await this.runStop(event.chatId);
@@ -1303,13 +1359,13 @@ export class Bridge {
       database.selectProject(space.chatId, projectId);
       database.setThread(space.chatId, projectId, thread.threadId);
       try {
-        let historyMessages: string[] = [];
+        let historyTurns: ConversationTurnView[] = [];
         try {
           const projectRoot = await this.resolveRuntimeProjectPath(project.rootPath);
           if (thread.threadId !== options?.skipHistoryForThreadId) {
             const details = await this.dependencies.codex.readThreadDetails(thread.threadId, true);
             await this.validateThreadProject(details, projectRoot, project.id);
-            historyMessages = this.renderTopicHistory(details);
+            historyTurns = this.renderTopicHistory(details);
           }
         } catch (error) {
           if (!this.isMissingRolloutError(error)) throw error;
@@ -1321,7 +1377,7 @@ export class Bridge {
             .update(`${space.chatId}\0${thread.threadId}`)
             .digest("hex")
             .slice(0, 32)}`,
-          historyMessages,
+          historyTurns,
         });
         database.bindFeishuThreadRoute({
           threadId: thread.threadId,
@@ -1411,7 +1467,7 @@ export class Bridge {
       chatId: space.chatId,
       title: "新对话",
       idempotencyKey: `clawbridge-new-topic-${randomUUID()}`,
-      historyMessages: [],
+      historyTurns: [],
     });
     database.bindFeishuPendingTopic({
       projectId,
@@ -1421,6 +1477,19 @@ export class Bridge {
     });
     database.selectProject(space.chatId, projectId);
     database.clearThread(space.chatId, projectId);
+    if (this.dependencies.composer) {
+      this.replyCard(
+        space.chatId,
+        renderComposerEntryCard(
+          projectId,
+          created.topicRootId,
+          this.dependencies.composer.getDirectSubmissionUrl(),
+        ),
+        "组合发送文字和附件",
+        "group",
+        created.topicRootId,
+      );
+    }
     await this.showProjectSpaceCard(
       space.chatId,
       project,
@@ -1705,6 +1774,67 @@ export class Bridge {
     }
   }
 
+  private async openThreadComposer(
+    event: InboundCardAction,
+    projectId: string,
+    threadId: string,
+    direct?: true,
+  ): Promise<void> {
+    const composer = this.dependencies.composer;
+    if (!composer) throw new Error("组合发送功能尚未启用。");
+    const route = this.dependencies.database.getFeishuThreadRoute(threadId);
+    if (
+      !route ||
+      route.projectId !== projectId ||
+      route.chatId !== event.chatId ||
+      route.ownerOpenId !== event.senderOpenId
+    ) {
+      throw new BridgeError("UNAUTHORIZED", "组合发送入口与当前对话不匹配");
+    }
+    const url = composer.createSubmissionUrl({
+      chatId: route.chatId,
+      chatType: "group",
+      senderOpenId: route.ownerOpenId,
+      topicRootId: route.topicRootId,
+    });
+    if (direct && composer.getDirectSubmissionUrl()) return;
+    this.replyCard(
+      route.chatId,
+      renderComposerLaunchCard(url),
+      "打开飞书组合发送表单",
+      "group",
+      route.topicRootId,
+    );
+  }
+
+  private async openPendingTopicComposer(
+    event: InboundCardAction,
+    projectId: string,
+    topicRootId: string,
+    direct?: true,
+  ): Promise<void> {
+    const composer = this.dependencies.composer;
+    if (!composer) throw new Error("组合发送功能尚未启用。");
+    const pending = this.dependencies.database.resolveFeishuPendingTopic(event.chatId, topicRootId);
+    if (!pending || pending.projectId !== projectId || pending.ownerOpenId !== event.senderOpenId) {
+      throw new BridgeError("UNAUTHORIZED", "组合发送入口与当前新对话不匹配");
+    }
+    const url = composer.createSubmissionUrl({
+      chatId: event.chatId,
+      chatType: "group",
+      senderOpenId: pending.ownerOpenId,
+      topicRootId,
+    });
+    if (direct && composer.getDirectSubmissionUrl()) return;
+    this.replyCard(
+      event.chatId,
+      renderComposerLaunchCard(url),
+      "打开飞书组合发送表单",
+      "group",
+      topicRootId,
+    );
+  }
+
   private async showConversationToolbar(
     projectId: string,
     threadId: string,
@@ -1726,6 +1856,10 @@ export class Bridge {
       },
       selectedModel: execution?.model ?? null,
       selectedReasoningEffort: execution?.reasoningEffort ?? null,
+      composerEnabled: Boolean(this.dependencies.composer),
+      ...(this.dependencies.composer?.getDirectSubmissionUrl()
+        ? { composerUrl: this.dependencies.composer.getDirectSubmissionUrl()! }
+        : {}),
     });
     const fallbackText = `对话 #${thread.localNumber} 模型设置`;
     const toolbarMessageId =
@@ -1736,9 +1870,9 @@ export class Bridge {
         body: fallbackText,
         audience: "group",
       });
-    if (toolbarMessageId) {
+    if (replaceMessageId) {
       await this.updateOrReplyCard(
-        toolbarMessageId,
+        replaceMessageId,
         route.chatId,
         card,
         fallbackText,
@@ -1746,6 +1880,16 @@ export class Bridge {
         route.topicRootId,
       );
     } else {
+      if (toolbarMessageId && this.dependencies.channel.deleteMessage) {
+        try {
+          await this.dependencies.channel.deleteMessage(toolbarMessageId);
+        } catch (error) {
+          this.dependencies.logger.warn(
+            { err: error, messageId: toolbarMessageId, threadId },
+            "Could not withdraw the previous conversation toolbar",
+          );
+        }
+      }
       this.replyCard(route.chatId, card, fallbackText, "group", route.topicRootId);
     }
     await this.drainDeliveries();
@@ -1912,7 +2056,7 @@ export class Bridge {
 
   private conversationTurns(
     details: CodexThreadDetails,
-  ): Array<{ userText: string; assistantText: string }> {
+  ): Array<{ turnId: string; userText: string; assistantText: string }> {
     return details.turns.flatMap((turn) => {
       const userText = turn.messages
         .filter((message) => message.role === "user" && message.text.trim())
@@ -1925,23 +2069,29 @@ export class Bridge {
       const assistantText = (finalAnswers.length > 0 ? finalAnswers : assistantMessages)
         .map((message) => message.text.trim())
         .join("\n\n");
-      return userText || assistantText ? [{ userText, assistantText }] : [];
+      return userText || assistantText ? [{ turnId: turn.id, userText, assistantText }] : [];
     });
   }
 
-  private renderTopicHistory(details: CodexThreadDetails): string[] {
-    return this.conversationTurns(details).flatMap((turn, index) => {
-      const content = [
-        turn.userText ? `**👤 用户**\n${turn.userText}` : "",
-        turn.assistantText ? `**🤖 Codex**\n${turn.assistantText}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-      const chunks = splitMessage(content, 2_750);
-      return chunks.map(
-        (chunk, chunkIndex) =>
-          `第 ${index + 1} 轮${chunks.length > 1 ? `（${chunkIndex + 1}/${chunks.length}）` : ""}\n\n${chunk}`,
-      );
+  private renderTopicHistory(details: CodexThreadDetails): ConversationTurnView[] {
+    const taskByTurnId = new Map(
+      this.dependencies.database
+        .listTasksForThread(details.id)
+        .filter((task) => task.codexTurnId)
+        .map((task) => [task.codexTurnId!, task]),
+    );
+    return this.conversationTurns(details).map((turn, index) => {
+      const task = taskByTurnId.get(turn.turnId);
+      return {
+        title: `第 ${index + 1} 轮`,
+        userText: turn.userText,
+        assistantText: turn.assistantText,
+        ...(task?.attachments.length
+          ? {
+              attachments: task.attachments.map(({ name, type }) => ({ name, type })),
+            }
+          : {}),
+      };
     });
   }
 
@@ -2404,6 +2554,7 @@ export class Bridge {
 
   private async refreshThreadList(project: ProjectRecord, projectRoot: string): Promise<void> {
     this.assertNotStopping();
+    const observedThreadIds = new Set<string>();
     const requests: Array<Promise<{ archived: boolean; threads: CodexThreadSummary[] }>> = [
       this.dependencies.codex
         .listThreads({ cwd: projectRoot, limit: 50, archived: false })
@@ -2416,6 +2567,7 @@ export class Bridge {
       for (const summary of result.threads) {
         if (await this.threadBelongsToProject(summary, projectRoot, project.id)) {
           this.indexThread(project.id, summary, result.archived);
+          observedThreadIds.add(summary.id);
         }
       }
     }
@@ -2423,17 +2575,62 @@ export class Bridge {
       .filter(([, assignedProjectId]) => assignedProjectId === project.id)
       .map(([threadId]) => threadId);
     for (const threadId of assignedThreadIds) {
+      if (observedThreadIds.has(threadId)) continue;
       try {
         this.assertNotStopping();
         const summary = await this.dependencies.codex.readThread(threadId);
-        this.indexThread(project.id, summary, false);
+        const existing = this.dependencies.database.getProjectThread(project.id, threadId);
+        this.indexThread(project.id, summary, existing?.archived ?? false);
+        observedThreadIds.add(threadId);
       } catch (error) {
-        this.dependencies.logger.warn(
-          { err: error, threadId, projectId: project.id },
-          "Failed to read a Desktop-assigned thread",
-        );
+        if (this.isMissingRolloutError(error)) {
+          this.markThreadUnavailable(project.id, threadId);
+          observedThreadIds.add(threadId);
+        } else {
+          this.dependencies.logger.warn(
+            { err: error, threadId, projectId: project.id },
+            "Failed to read a Desktop-assigned thread",
+          );
+        }
       }
     }
+    const staleRows = this.dependencies.database
+      .listProjectThreads(project.id, { includeArchived: true })
+      .filter((row) => !observedThreadIds.has(row.threadId));
+    for (const row of staleRows) {
+      try {
+        this.assertNotStopping();
+        const summary = await this.dependencies.codex.readThread(row.threadId);
+        if (await this.threadBelongsToProject(summary, projectRoot, project.id)) {
+          this.indexThread(project.id, summary, row.archived);
+        } else {
+          this.markThreadUnavailable(project.id, row.threadId);
+        }
+      } catch (error) {
+        if (this.isMissingRolloutError(error)) {
+          this.markThreadUnavailable(project.id, row.threadId);
+        } else {
+          this.dependencies.logger.warn(
+            { err: error, threadId: row.threadId, projectId: project.id },
+            "Failed to reconcile a thread missing from the Desktop lists",
+          );
+        }
+      }
+    }
+  }
+
+  private markThreadUnavailable(projectId: string, threadId: string): void {
+    const { database } = this.dependencies;
+    const existing = database.getProjectThread(projectId, threadId);
+    if (!existing) return;
+    database.upsertThread({
+      threadId,
+      projectId,
+      status: "unavailable",
+      lastSyncedAt: new Date().toISOString(),
+    });
+    database.clearThreadBindingsForThread(projectId, threadId);
+    database.deleteFeishuThreadRoute(threadId);
   }
 
   private async resolveThread(
@@ -2556,9 +2753,8 @@ export class Bridge {
 
   private isUnusableEmptyThread(thread: ThreadIndexRecord): boolean {
     return (
-      (thread.status === "failed" || thread.status === "unavailable") &&
-      !thread.title?.trim() &&
-      !thread.preview?.trim()
+      thread.status === "unavailable" ||
+      (thread.status === "failed" && !thread.title?.trim() && !thread.preview?.trim())
     );
   }
 
@@ -2771,7 +2967,13 @@ export class Bridge {
   }
 
   private drainDeliveries(): Promise<void> {
-    if (this.deliveryWorker) return this.deliveryWorker;
+    if (this.deliveryWorker) {
+      const activeWorker = this.deliveryWorker;
+      return activeWorker.then(() => {
+        if (this.deliveryWorker === activeWorker) this.deliveryWorker = undefined;
+        return this.drainDeliveries();
+      });
+    }
     if (this.stopping) return Promise.resolve();
     const worker = this.runDeliveryLoop();
     this.deliveryWorker = worker;
@@ -3173,7 +3375,7 @@ export class Bridge {
       messages.push(current.message);
       current = current.cause;
     }
-    return /(no rollout found for thread id|is not materialized yet|includeTurns is unavailable before first user message)/i.test(
+    return /(no rollout found for thread id|thread not loaded|thread(?: id)?[^\n]*not found|rollout[^\n]*not found|is not materialized yet|includeTurns is unavailable before first user message)/i.test(
       messages.join(" "),
     );
   }

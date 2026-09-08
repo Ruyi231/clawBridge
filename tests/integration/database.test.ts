@@ -119,6 +119,15 @@ describe("task persistence", () => {
         { key: "file-key", name: "notes.md", type: "file" },
       ],
     });
+    database.updateTask(queued!.id, "completed", {
+      codexTurnId: "turn-with-attachments",
+      finalText: "处理完成",
+    });
+    expect(database.getTaskByEventId("attachment-event")).toMatchObject({
+      codexTurnId: "turn-with-attachments",
+      finalText: "处理完成",
+    });
+    expect(database.listTasksForThread("thread-with-attachments")).toHaveLength(1);
   });
 
   it("claims, retries, and completes persisted deliveries", () => {
@@ -792,5 +801,29 @@ describe("project and thread persistence", () => {
       { model: "gpt-test", reasoningEffort: "medium" },
     );
     expect(task).toMatchObject({ model: "gpt-test", reasoningEffort: "medium" });
+  });
+
+  it("persists and consumes one-time cloud composer routing sessions", () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    expect(
+      database.createComposerSession({
+        token: "composer-token",
+        chatId: "chat-composer",
+        chatType: "group",
+        topicRootId: "topic-composer",
+        senderOpenId: "owner",
+        expiresAt,
+      }),
+    ).toMatchObject({
+      token: "composer-token",
+      chatId: "chat-composer",
+      topicRootId: "topic-composer",
+      consumedAt: null,
+    });
+
+    expect(database.consumeComposerSession("composer-token")).toBe(true);
+    expect(database.consumeComposerSession("composer-token")).toBe(false);
+    expect(database.getComposerSession("composer-token")?.consumedAt).toBeTruthy();
+    expect(database.pruneComposerSessions()).toBe(1);
   });
 });

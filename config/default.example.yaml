@@ -13,6 +13,33 @@ feishu:
   allowedOpenIdEnv: CLAWBRIDGE_FEISHU_ALLOWED_OPEN_ID
   directMessagesOnly: true
 
+# Optional mixed text/image/file composer backed entirely by Feishu Bitable.
+# ClawBridge only makes outbound OpenAPI requests.
+composer:
+  enabled: false
+  # singleActive works with a native Bitable form and needs no low-code app.
+  # The most recently activated topic receives the next form submission.
+  # sessionParam supports concurrent forms but requires a low-code page that
+  # copies clawbridge_session into the hidden routing field.
+  routingMode: singleActive
+  formUrl: https://example.feishu.cn/share/base/your-native-form
+  appToken: bascn_xxx
+  tableId: tbl_xxx
+  pollIntervalMs: 5000
+  maxFiles: 20
+  tokenTtlMinutes: 30
+  fields:
+    session: ClawBridge会话
+    text: 消息内容
+    attachments: 附件
+    status: 处理状态
+    error: 错误信息
+  statuses:
+    pending: 待处理
+    processing: 处理中
+    accepted: 已接收
+    failed: 失败
+
 codex:
   command: codex
   args: [app-server]

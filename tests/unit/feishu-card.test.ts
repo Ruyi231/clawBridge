@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseCardAction,
+  renderComposerLaunchCard,
   renderConversationToolbarCard,
   renderHomeCard,
   renderModelListCard,
@@ -61,6 +62,13 @@ describe("parseCardAction", () => {
       { version: 1, action: "thread.show", projectId: "claw", threadId: "019f-aa" },
       { version: 1, action: "model.list", projectId: "claw", threadId: "019f-aa" },
       { version: 1, action: "model.close", projectId: "claw", threadId: "019f-aa" },
+      { version: 1, action: "composer.open.thread", projectId: "claw", threadId: "019f-aa" },
+      {
+        version: 1,
+        action: "composer.open.pending",
+        projectId: "claw",
+        topicRootId: "om_topic-1",
+      },
       {
         version: 1,
         action: "model.use",
@@ -237,6 +245,38 @@ describe("Feishu card rendering", () => {
     expect(JSON.stringify(card)).toContain("high");
     expect(JSON.stringify(card)).not.toContain("直接在本话题发送下一项任务");
     expect(JSON.stringify(card)).not.toContain("查看状态");
+  });
+
+  it("adds a callback entry that activates mixed composer routing", () => {
+    const formUrl = "https://example.feishu.cn/share/base/native-form";
+    const card = renderConversationToolbarCard({
+      project: { id: "demo", name: "Demo" },
+      thread: { id: "thread-1", projectId: "demo", localNumber: 3, title: "修复登录" },
+      composerEnabled: true,
+      composerUrl: formUrl,
+    });
+    expect(card.elements).toHaveLength(2);
+    expect(JSON.stringify(card)).toContain("组合发送");
+    expect(JSON.stringify(card)).toContain(formUrl);
+    expect(actions(card)).toEqual([
+      { version: 1, action: "model.list", projectId: "demo", threadId: "thread-1" },
+      {
+        version: 1,
+        action: "composer.open.thread",
+        projectId: "demo",
+        threadId: "thread-1",
+        direct: true,
+      },
+    ]);
+  });
+
+  it("renders the native Feishu form only after the topic is activated", () => {
+    const formUrl = "https://example.feishu.cn/share/base/native-form";
+    const card = renderComposerLaunchCard(formUrl);
+
+    expect(JSON.stringify(card)).toContain(formUrl);
+    expect(JSON.stringify(card)).toContain("已绑定到当前话题");
+    expect(actions(card)).toEqual([]);
   });
 
   it("renders a compact model picker without descriptions or project navigation", () => {

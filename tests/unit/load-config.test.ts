@@ -71,6 +71,20 @@ describe("loadConfig", () => {
       path.resolve(path.dirname(configPath), "..", "data/attachments"),
     );
     expect(loaded.config.bridge.attachmentMaxBytes).toBe(20 * 1024 * 1024);
+    expect(loaded.config.composer.enabled).toBe(false);
+  });
+
+  it("requires the Feishu cloud resources when the composer is enabled", async () => {
+    const configPath = await writeConfiguration();
+    const content = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      content.replace("codex: {}", "composer:\n  enabled: true\ncodex: {}"),
+    );
+
+    await expect(loadConfig(configPath, environment)).rejects.toThrow(
+      /composer\.formUrl, appToken and tableId are required/,
+    );
   });
 
   it("resolves a relative desktop state file like other local paths", async () => {

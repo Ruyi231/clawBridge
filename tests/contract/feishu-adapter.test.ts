@@ -8,6 +8,7 @@ const larkMocks = vi.hoisted(() => ({
   createMessage: vi.fn(),
   replyMessage: vi.fn(),
   patchMessage: vi.fn(),
+  deleteMessage: vi.fn(),
   getMessageResource: vi.fn(),
   createChat: vi.fn(),
   getChat: vi.fn(),
@@ -34,7 +35,11 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
       larkMocks.clientOptions = options;
     }
     readonly im = {
-      message: { create: larkMocks.createMessage, reply: larkMocks.replyMessage },
+      message: {
+        create: larkMocks.createMessage,
+        reply: larkMocks.replyMessage,
+        delete: larkMocks.deleteMessage,
+      },
       v1: { message: { patch: larkMocks.patchMessage } },
       messageResource: { get: larkMocks.getMessageResource },
       chat: {
@@ -102,6 +107,7 @@ describe("Feishu adapter card contract", () => {
       data: { message_id: "om-reply-1" },
     });
     larkMocks.patchMessage.mockResolvedValue({ code: 0, data: {} });
+    larkMocks.deleteMessage.mockResolvedValue({ code: 0, data: {} });
     larkMocks.getMessageResource.mockResolvedValue({
       headers: { "content-length": "4" },
       writeFile: async (targetPath: string) => writeFile(targetPath, "test"),
@@ -315,6 +321,19 @@ describe("Feishu adapter card contract", () => {
     expect(JSON.stringify(patchedCard)).toContain('"action":"menu.refresh"');
     expect(larkMocks.createMessage).not.toHaveBeenCalled();
     expect(larkMocks.replyMessage).not.toHaveBeenCalled();
+  });
+
+  it("withdraws a bot-authored toolbar message", async () => {
+    const adapter = new FeishuAdapter(
+      { appId: "cli-test", appSecret: "secret" },
+      pino({ enabled: false }),
+    );
+
+    await adapter.deleteMessage("om-toolbar-old");
+
+    expect(larkMocks.deleteMessage).toHaveBeenCalledWith({
+      path: { message_id: "om-toolbar-old" },
+    });
   });
 
   it("rejects malformed card actions without dispatching them", async () => {
@@ -658,7 +677,7 @@ describe("Feishu adapter card contract", () => {
         chatId: "oc-project-1",
         title: "修复移动端布局",
         idempotencyKey: "thread-019f",
-        historyMessages: ["第 1 轮\n\n👤 用户\n你好\n\n🤖 Codex\n你好！"],
+        historyTurns: [{ title: "第 1 轮", userText: "你好", assistantText: "你好！" }],
       }),
     ).resolves.toEqual({ topicRootId: "om-sent-1" });
     expect(larkMocks.createMessage).toHaveBeenCalledWith({
@@ -717,8 +736,10 @@ describe("Feishu adapter card contract", () => {
             elements: [
               {
                 tag: "markdown",
-                content: "👤 用户\n你好\n\n🤖 Codex\n你好！",
+                content: "**👤 用户**\n你好",
               },
+              { tag: "hr" },
+              { tag: "markdown", content: "**🤖 Codex**\n你好！" },
             ],
           },
         }),
@@ -736,8 +757,12 @@ describe("Feishu adapter card contract", () => {
       chatId: "oc-project-1",
       title: "含本机图片的历史",
       idempotencyKey: "thread-local-image",
-      historyMessages: [
-        "第 1 轮\n\n图片如下：![运行截图](/C:/Users/Ruyi/Documents/Codex/result.png)",
+      historyTurns: [
+        {
+          title: "第 1 轮",
+          userText: "图片如下：![运行截图](/C:/Users/Ruyi/Documents/Codex/result.png)",
+          assistantText: "已查看图片。",
+        },
       ],
     });
 
@@ -764,9 +789,21 @@ describe("Feishu adapter card contract", () => {
         chatId: "oc-project",
         replyToMessageId: "om-topic-root",
         title: "Demo · 任务运行中",
-        initialText: "正在连接 Codex…",
+        userText: "分析这些材料",
+        assistantText: "正在连接 Codex…",
+        attachments: [{ name: "截图.png", type: "image" }],
       }),
     ).resolves.toEqual({ streamId: "card-stream-1", messageId: "om-reply-1" });
+    const streamCardRequest = larkMocks.createCard.mock.calls.at(-1)?.[0] as {
+      data: { data: string };
+    };
+    const streamCard = JSON.parse(streamCardRequest.data.data) as {
+      body: { elements: Array<{ tag: string; expanded?: boolean }> };
+    };
+    expect(JSON.stringify(streamCard)).toContain("**👤 用户**\\n分析这些材料");
+    expect(streamCard.body.elements).toContainEqual(
+      expect.objectContaining({ tag: "collapsible_panel", expanded: false }),
+    );
     expect(larkMocks.replyMessage).toHaveBeenCalledWith({
       path: { message_id: "om-topic-root" },
       data: {
@@ -780,7 +817,7 @@ describe("Feishu adapter card contract", () => {
     expect(larkMocks.updateCardContent).toHaveBeenCalledWith({
       path: { card_id: "card-stream-1", element_id: "task_stream_content" },
       data: {
-        content: "正在修改文件",
+        content: "**🤖 Codex**\n正在修改文件",
         sequence: 1,
         uuid: "task-card-stream-1-1",
       },

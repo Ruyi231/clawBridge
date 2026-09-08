@@ -22,6 +22,8 @@ export interface InboundMessage {
     key: string;
     name: string;
     type: "image" | "file";
+    source?: "feishu" | "local";
+    localPath?: string;
   }>;
   receivedAt: string;
 }
@@ -57,7 +59,15 @@ export interface TaskRecord {
   progressSummary: string | null;
   model: string | null;
   reasoningEffort: string | null;
-  attachments: Array<{ key: string; name: string; type: "image" | "file" }>;
+  attachments: Array<{
+    key: string;
+    name: string;
+    type: "image" | "file";
+    source?: "feishu" | "local";
+    localPath?: string;
+  }>;
+  codexTurnId: string | null;
+  finalText: string | null;
   createdAt: string;
   updatedAt: string;
   error: string | null;

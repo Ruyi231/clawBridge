@@ -1,6 +1,6 @@
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ChannelAdapter } from "../../src/channels/channel-adapter.js";
@@ -17,7 +17,11 @@ class FakeChannel implements ChannelAdapter {
   callback?: (event: InboundEvent) => Promise<void>;
   readonly sent: OutboundMessage[] = [];
   readonly updatedCards: Array<{ messageId: string; card: Record<string, unknown> }> = [];
+  readonly deletedMessages: string[] = [];
   updateCardMessage?: NonNullable<ChannelAdapter["updateCardMessage"]>;
+  readonly deleteMessage = vi.fn(async (messageId: string) => {
+    this.deletedMessages.push(messageId);
+  });
   sendAttempts = 0;
   private remainingFailures: number;
   private releaseBlockedSend?: () => void;
@@ -197,6 +201,21 @@ const config: BridgeConfig = {
     appSecretEnv: "APP_SECRET",
     allowedOpenIdEnv: "OWNER_ID",
     directMessagesOnly: true,
+  },
+  composer: {
+    enabled: false,
+    routingMode: "sessionParam",
+    pollIntervalMs: 5_000,
+    maxFiles: 20,
+    tokenTtlMinutes: 30,
+    fields: {
+      session: "ClawBridge会话",
+      text: "消息内容",
+      attachments: "附件",
+      status: "处理状态",
+      error: "错误信息",
+    },
+    statuses: { pending: "待处理", processing: "处理中", accepted: "已接收", failed: "失败" },
   },
   codex: {
     command: "fake",
@@ -523,6 +542,93 @@ describe("Bridge vertical slice", () => {
     }
   });
 
+  it("accepts one composed turn with text and multiple local attachments", async () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "clawbridge-composed-"));
+    const sourceDirectory = path.join(temporaryDirectory, "composer", "submission-1");
+    mkdirSync(sourceDirectory, { recursive: true });
+    const imagePath = path.join(sourceDirectory, "photo.png");
+    const filePath = path.join(sourceDirectory, "notes.md");
+    writeFileSync(imagePath, "image");
+    writeFileSync(filePath, "notes");
+    try {
+      const channel = new FakeChannel({ streaming: true });
+      const codex = fakeCodex();
+      const database = new BridgeDatabase(":memory:");
+      bridge = new Bridge({
+        channel,
+        codex,
+        database,
+        config: {
+          ...config,
+          bridge: { ...config.bridge, attachmentDirectory: temporaryDirectory },
+        },
+        projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+        allowedOpenId: "owner",
+        logger: pino({ level: "silent" }),
+      });
+      await bridge.start();
+      database.bindFeishuProjectSpace({
+        projectId: "demo",
+        chatId: "chat-project",
+        ownerOpenId: "owner",
+        displayName: "[Codex] Demo",
+      });
+      database.bindFeishuPendingTopic({
+        projectId: "demo",
+        chatId: "chat-project",
+        topicRootId: "topic-composed",
+        ownerOpenId: "owner",
+      });
+
+      await bridge.submitComposedTurn({
+        eventId: "composer:submission-1",
+        messageId: "composer:submission-1",
+        chatId: "chat-project",
+        chatType: "group",
+        topicRootId: "topic-composed",
+        senderOpenId: "owner",
+        text: "一起分析",
+        attachments: [
+          {
+            key: "local-image",
+            name: "photo.png",
+            type: "image",
+            source: "local",
+            localPath: imagePath,
+          },
+          {
+            key: "local-file",
+            name: "notes.md",
+            type: "file",
+            source: "local",
+            localPath: filePath,
+          },
+        ],
+        receivedAt: new Date().toISOString(),
+      });
+      await vi.waitFor(() => expect(database.listTasks({ limit: 1 })[0]?.state).toBe("completed"));
+
+      expect(channel.downloadAttachment).not.toHaveBeenCalled();
+      const turn = vi.mocked(codex.runTurn).mock.calls[0]?.[0];
+      expect(turn?.inputs).toEqual([
+        expect.objectContaining({ type: "text", text: expect.stringContaining("2-file.md") }),
+        expect.objectContaining({ type: "localImage" }),
+      ]);
+      expect(existsSync(sourceDirectory)).toBe(false);
+      expect(channel.startTaskStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userText: "一起分析",
+          attachments: [
+            { name: "photo.png", type: "image" },
+            { name: "notes.md", type: "file" },
+          ],
+        }),
+      );
+    } finally {
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("persists an inbound message, runs Codex, and sends the final result", async () => {
     const channel = new FakeChannel();
     const codex = fakeCodex();
@@ -689,19 +795,95 @@ describe("Bridge vertical slice", () => {
       topicRootId: "topic-root-1",
     });
     await vi.waitFor(() => expect(codex.runTurn).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(channel.deletedMessages).toContain(firstToolbarMessageId));
     await vi.waitFor(() =>
-      expect(channel.updatedCards.some((entry) => entry.messageId === firstToolbarMessageId)).toBe(
-        true,
-      ),
+      expect(
+        channel.sent.filter(
+          (message) => message.kind === "card" && message.text.includes("模型设置"),
+        ),
+      ).toHaveLength(2),
     );
-    expect(
-      channel.sent.filter(
-        (message) => message.kind === "card" && message.text.includes("模型设置"),
-      ),
-    ).toHaveLength(1);
-    expect(database.getFeishuThreadRoute("thread-topic")?.toolbarMessageId).toBe(
+    expect(database.getFeishuThreadRoute("thread-topic")?.toolbarMessageId).not.toBe(
       firstToolbarMessageId,
     );
+  });
+
+  it("opens a native composer directly while activating its bound topic", async () => {
+    const channel = new FakeChannel({ updateCards: true });
+    const codex = fakeCodex();
+    vi.mocked(codex.runTurn).mockImplementation(async (input) => {
+      input.onStarted?.({ threadId: "thread-topic", turnId: "turn-topic" });
+      return { threadId: "thread-topic", turnId: "turn-topic", finalText: "done" };
+    });
+    const database = new BridgeDatabase(":memory:");
+    database.syncProjects([{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }]);
+    database.upsertThread({ threadId: "thread-topic", projectId: "demo", status: "idle" });
+    database.bindFeishuProjectSpace({
+      projectId: "demo",
+      chatId: "chat-group",
+      ownerOpenId: "owner",
+      displayName: "[Codex] Demo",
+    });
+    database.bindFeishuThreadRoute({
+      threadId: "thread-topic",
+      projectId: "demo",
+      chatId: "chat-group",
+      topicRootId: "topic-root-1",
+      ownerOpenId: "owner",
+    });
+    const formUrl = "https://example.feishu.cn/share/base/native-form";
+    const composer = {
+      getDirectSubmissionUrl: vi.fn(() => formUrl),
+      createSubmissionUrl: vi.fn(() => formUrl),
+    };
+    bridge = new Bridge({
+      channel,
+      codex,
+      database,
+      config,
+      projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
+      composer,
+      allowedOpenId: "owner",
+      logger: pino({ level: "silent" }),
+    });
+
+    await bridge.start();
+    await channel.receiveGroup("生成工具栏", "composer-toolbar", {
+      topicRootId: "topic-root-1",
+    });
+    await vi.waitFor(() =>
+      expect(
+        channel.sent.some(
+          (message) =>
+            message.kind === "card" &&
+            JSON.stringify(message.card).includes("composer.open.thread"),
+        ),
+      ).toBe(true),
+    );
+    const toolbar = channel.sent.findLast(
+      (message) =>
+        message.kind === "card" && JSON.stringify(message.card).includes("composer.open.thread"),
+    );
+    const value = cardActionValue(toolbar, "composer.open.thread");
+    expect(value).toBeDefined();
+    expect(JSON.stringify(toolbar)).toContain(formUrl);
+    const sentBeforeClick = channel.sent.length;
+    await channel.receiveCard(
+      value!,
+      "composer-open",
+      "owner",
+      channel.latestCardMessageIdForChat("chat-group"),
+      undefined,
+      "chat-group",
+    );
+
+    expect(composer.createSubmissionUrl).toHaveBeenCalledWith({
+      chatId: "chat-group",
+      chatType: "group",
+      senderOpenId: "owner",
+      topicRootId: "topic-root-1",
+    });
+    expect(channel.sent).toHaveLength(sentBeforeClick);
   });
 
   it("opens model settings at the bottom when a project topic receives the exact model keyword", async () => {
@@ -1475,6 +1657,25 @@ describe("Bridge vertical slice", () => {
       title: "Existing work",
       archived: false,
     });
+    const historicalTask = database.enqueue(
+      {
+        eventId: "history-attachment-event",
+        messageId: "history-attachment-message",
+        chatId: "chat-dissolved",
+        chatType: "group",
+        topicRootId: "topic-old",
+        senderOpenId: "owner",
+        text: "历史问题",
+        attachments: [{ key: "history-image", name: "现场照片.jpg", type: "image" }],
+        receivedAt: new Date().toISOString(),
+      },
+      "demo",
+      "thread-existing",
+    );
+    database.updateTask(historicalTask!.id, "completed", {
+      codexTurnId: "turn-1",
+      finalText: "历史答案",
+    });
     database.bindFeishuProjectSpace({
       projectId: "demo",
       chatId: "chat-dissolved",
@@ -1520,11 +1721,15 @@ describe("Bridge vertical slice", () => {
     expect(channel.createProjectSpace).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: "demo", ownerOpenId: "owner" }),
     );
-    const historyMessages = channel.createProjectTopic.mock.calls.at(-1)?.[0].historyMessages ?? [];
-    expect(historyMessages.join("\n")).toContain("**👤 用户**\n历史问题");
-    expect(historyMessages.join("\n")).toContain("**🤖 Codex**\n历史答案");
-    expect(historyMessages.join("\n")).not.toContain("中间过程不应恢复");
-    expect(historyMessages.join("\n")).toContain("答案上半段\n\n答案下半段");
+    const historyTurns = channel.createProjectTopic.mock.calls.at(-1)?.[0].historyTurns ?? [];
+    expect(historyTurns[0]).toMatchObject({
+      title: "第 1 轮",
+      userText: "历史问题",
+      assistantText: "历史答案",
+      attachments: [{ name: "现场照片.jpg", type: "image" }],
+    });
+    expect(JSON.stringify(historyTurns)).not.toContain("中间过程不应恢复");
+    expect(historyTurns[1]?.assistantText).toBe("答案上半段\n\n答案下半段");
   });
 
   it("migrates a legacy topic group and keeps project controls inside the group", async () => {
@@ -1596,7 +1801,7 @@ describe("Bridge vertical slice", () => {
         chatId: "chat-existing-project",
         idempotencyKey: expect.stringMatching(/^clawbridge-new-topic-/),
         title: "新对话",
-        historyMessages: [],
+        historyTurns: [],
       }),
     );
     const originalTopicKey = channel.createProjectTopic.mock.calls.at(-1)?.[0].idempotencyKey;
@@ -2984,9 +3189,18 @@ describe("Bridge vertical slice", () => {
   it("lists archived chats even when newer active chats fill the display window", async () => {
     const channel = new FakeChannel();
     const database = new BridgeDatabase(":memory:");
+    const codex = fakeCodex();
+    vi.mocked(codex.readThread).mockImplementation(async (threadId) => ({
+      id: threadId,
+      name: threadId === "thread-archived-old" ? "Archived target" : "Test thread",
+      preview: "",
+      cwd: process.cwd(),
+      updatedAt: Date.now(),
+      status: "notLoaded",
+    }));
     bridge = new Bridge({
       channel,
-      codex: fakeCodex(),
+      codex,
       database,
       config,
       projects: [{ id: "demo", name: "Demo", rootPath: process.cwd(), enabled: true }],
@@ -3078,14 +3292,38 @@ describe("Bridge vertical slice", () => {
       const channel = new FakeChannel();
       const database = new BridgeDatabase(":memory:");
       const codex = fakeCodex();
-      vi.mocked(codex.readThread).mockImplementation(async (threadId) => ({
-        id: threadId,
-        name: threadId === "thread-desktop-assigned" ? "Desktop assigned work" : "Test thread",
-        preview: "Existing Desktop conversation",
-        cwd: "C:\\historical\\unrelated-path",
-        updatedAt: Date.now(),
-        status: "notLoaded",
-      }));
+      vi.mocked(codex.readThread).mockImplementation(async (threadId) => {
+        if (threadId === "thread-desktop-deleted") {
+          throw new Error("thread not loaded: thread-desktop-deleted");
+        }
+        return {
+          id: threadId,
+          name:
+            threadId === "thread-desktop-assigned"
+              ? "Desktop assigned work"
+              : threadId === "thread-desktop-archived"
+                ? "Desktop archived work"
+                : "Test thread",
+          preview: "Existing Desktop conversation",
+          cwd: "C:\\historical\\unrelated-path",
+          updatedAt: Date.now(),
+          status: "notLoaded",
+        };
+      });
+      vi.mocked(codex.listThreads).mockImplementation(async (input) =>
+        input.archived
+          ? [
+              {
+                id: "thread-desktop-archived",
+                name: "Desktop archived work",
+                preview: "Archived Desktop conversation",
+                cwd: spacedRoot,
+                updatedAt: Date.now(),
+                status: "notLoaded",
+              },
+            ]
+          : [],
+      );
       const desktopProjects: DesktopProjectSource = {
         listProjects: vi.fn(async () => ({
           sourcePath: path.join(temporaryDirectory, ".codex-global-state.json"),
@@ -3103,7 +3341,11 @@ describe("Bridge vertical slice", () => {
               name: "Project With Space",
               rootPaths: [spacedRoot],
               order: 1,
-              assignedThreadIds: ["thread-desktop-assigned"],
+              assignedThreadIds: [
+                "thread-desktop-assigned",
+                "thread-desktop-archived",
+                "thread-desktop-deleted",
+              ],
             },
             {
               sourceId: "desktop-chinese",
@@ -3147,6 +3389,14 @@ describe("Bridge vertical slice", () => {
         enabled: true,
       });
       expect(chineseProject).toMatchObject({ name: "项目文档", enabled: true });
+      database.upsertThread({
+        threadId: "thread-desktop-deleted",
+        projectId: "desktop@desktop-spaced",
+        title: "Deleted Desktop work",
+        preview: "This stale row must not remain visible",
+        status: "idle",
+        archived: false,
+      });
       await expect(areSameResolvedPath(clawProject.rootPath, clawRoot)).resolves.toBe(true);
       await expect(areSameResolvedPath(spacedProject.rootPath, spacedRoot)).resolves.toBe(true);
       await expect(areSameResolvedPath(chineseProject.rootPath, chineseRoot)).resolves.toBe(true);
@@ -3188,6 +3438,17 @@ describe("Bridge vertical slice", () => {
           database.getProjectThread("desktop@desktop-spaced", "thread-desktop-assigned"),
         ).toMatchObject({ title: "Desktop assigned work" }),
       );
+      expect(
+        database.getProjectThread("desktop@desktop-spaced", "thread-desktop-archived"),
+      ).toMatchObject({ title: "Desktop archived work", archived: true });
+      expect(
+        database.getProjectThread("desktop@desktop-spaced", "thread-desktop-deleted"),
+      ).toMatchObject({ status: "unavailable" });
+      const latestThreadCard = channel.sent.findLast(
+        (message) => message.kind === "card" && message.text.includes("选择 Project With Space"),
+      );
+      expect(JSON.stringify(latestThreadCard)).not.toContain("thread-desktop-archived");
+      expect(JSON.stringify(latestThreadCard)).not.toContain("thread-desktop-deleted");
 
       await bridge.stop();
       bridge = undefined;

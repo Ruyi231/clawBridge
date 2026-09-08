@@ -13,13 +13,15 @@
 
 ### 2.1 推荐：批量导入已验证权限
 
-ClawBridge 使用 `tenant_access_token` 以应用/机器人身份访问飞书，不需要用户身份权限。下面的配置来自 ClawBridge 当前实际运行应用的权限导出，并覆盖消息、CardKit、附件及项目群生命周期。进入“开发配置 → 权限管理”，使用“批量导入/导出权限”功能，将 [feishu-permissions.json](./feishu-permissions.json) 的完整内容粘贴并导入：
+ClawBridge 使用 `tenant_access_token` 以应用/机器人身份访问飞书，不需要用户身份权限。下面的配置覆盖消息、CardKit、附件、项目群生命周期以及可选的飞书云端组合发送页。进入“开发配置 → 权限管理”，使用“批量导入/导出权限”功能，将 [feishu-permissions.json](./feishu-permissions.json) 的完整内容粘贴并导入：
 
 ```json
 {
   "scopes": {
     "tenant": [
+      "bitable:app",
       "cardkit:card:write",
+      "drive:media:download",
       "im:chat.members:read",
       "im:chat.members:write_only",
       "im:chat:create",
@@ -43,7 +45,7 @@ ClawBridge 使用 `tenant_access_token` 以应用/机器人身份访问飞书，
 
 导入后检查权限列表并创建、发布一个新的应用版本。仅在后台导入但没有发布，新权限不会对正在运行的机器人生效。
 
-不要直接导入某个开发者账号导出的完整权限文件。该文件可能同时包含云文档、邮箱、审批、多维表格等 ClawBridge 不使用的权限，还可能包含大量 `user` 权限。批量导入通常也不会自动撤销此前已开通的无关权限；如需最小权限部署，请在导入后人工复核并移除无关项。
+不要直接导入某个开发者账号导出的完整权限文件。该文件可能同时包含邮箱、审批等 ClawBridge 不使用的权限，还可能包含大量 `user` 权限。批量导入通常也不会自动撤销此前已开通的无关权限；如需最小权限部署，请在导入后人工复核并移除无关项。若不启用云端组合发送页，可以不申请 `bitable:app` 和 `drive:media:download`。
 
 ### 2.2 权限用途
 
@@ -51,7 +53,9 @@ ClawBridge 使用 `tenant_access_token` 以应用/机器人身份访问飞书，
 
 | 权限码                                         | ClawBridge 用途                                |
 | ---------------------------------------------- | ---------------------------------------------- |
+| `bitable:app`                                  | 读取组合发送记录并写回处理状态（可选）         |
 | `cardkit:card:write`                           | 创建并更新流式任务卡、控制卡和模型工具栏       |
+| `drive:media:download`                         | 下载组合发送记录中的云端附件（可选）           |
 | `im:message`                                   | 消息读写综合权限，支持发送、回复和原位更新消息 |
 | `im:message.p2p_msg:readonly`                  | 接收机器人单聊消息，用于菜单、配对和控制台操作 |
 | `im:message.group_at_msg:readonly`             | 接收群聊中提及机器人的消息                     |

@@ -1,32 +1,16 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { createHash } from "node:crypto";
 import type { Logger } from "pino";
-import type { ChannelAdapter } from "./channel-adapter.js";
+import type { ChannelAdapter, ConversationTurnView } from "./channel-adapter.js";
+import {
+  createConversationTurnCard,
+  renderAssistantCardMarkdown,
+} from "./conversation-turn-card.js";
 import { parseFeishuCardAction, parseFeishuMessage } from "./feishu-event.js";
 import type { InboundEvent, OutboundMessage } from "../core/types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function sanitizeHistoryCardMarkdown(markdown: string): string {
-  let insideFence = false;
-  return markdown
-    .split("\n")
-    .map((line) => {
-      if (/^\s*(```|~~~)/.test(line)) {
-        insideFence = !insideFence;
-        return line;
-      }
-      if (insideFence) return line;
-      return line
-        .replace(
-          /!\[([^\]]*)\]\([^\r\n)]*\)/g,
-          (_match, alt: string) => `🖼️ ${alt.trim() || "图片"}（图片未同步）`,
-        )
-        .replace(/<img\b[^>]*>/gi, "🖼️ 图片（图片未同步）");
-    })
-    .join("\n");
 }
 
 function convertCardButton(
@@ -400,6 +384,15 @@ export class FeishuAdapter implements ChannelAdapter {
     }
   }
 
+  async deleteMessage(messageId: string): Promise<void> {
+    const response = await this.callApi("撤回飞书消息", () =>
+      this.client.im.message.delete({ path: { message_id: messageId } }),
+    );
+    if (response.code !== 0) {
+      throw new Error(`Feishu message delete failed: ${response.msg ?? response.code}`);
+    }
+  }
+
   async downloadAttachment(input: {
     messageId: string;
     fileKey: string;
@@ -592,7 +585,7 @@ export class FeishuAdapter implements ChannelAdapter {
     chatId: string;
     title: string;
     idempotencyKey: string;
-    historyMessages?: string[];
+    historyTurns?: ConversationTurnView[];
   }): Promise<{ topicRootId: string }> {
     const title = input.title
       .replace(/[\r\n\t]/g, " ")
@@ -617,11 +610,15 @@ export class FeishuAdapter implements ChannelAdapter {
     if (!rootMessageId) {
       throw new Error("Feishu create project topic failed: response is missing message_id");
     }
-    const historyMessages = (input.historyMessages ?? []).filter((message) => message.trim());
-    const replies: Array<{ kind: "text" | "history"; text: string }> = historyMessages.length
+    const historyTurns = (input.historyTurns ?? []).filter(
+      (turn) => turn.userText.trim() || turn.assistantText.trim(),
+    );
+    const replies: Array<
+      { kind: "text"; text: string } | { kind: "history"; turn: ConversationTurnView }
+    > = historyTurns.length
       ? [
           { kind: "text", text: "—— 已恢复的历史对话 ——" },
-          ...historyMessages.map((text) => ({ kind: "history" as const, text })),
+          ...historyTurns.map((turn) => ({ kind: "history" as const, turn })),
           {
             kind: "text",
             text: "—— 以下为新的对话 ——\n可直接发送新的 Codex 任务。",
@@ -631,7 +628,7 @@ export class FeishuAdapter implements ChannelAdapter {
     let topicRootId = rootMessageId;
     for (const [index, reply] of replies.entries()) {
       const historyCardId =
-        reply.kind === "history" ? await this.createHistoryCard(reply.text) : undefined;
+        reply.kind === "history" ? await this.createHistoryCard(reply.turn) : undefined;
       let response: Awaited<ReturnType<typeof this.client.im.message.reply>> | undefined;
       let lastError: unknown;
       for (const delayMilliseconds of [0, 400, 1_000]) {
@@ -680,19 +677,8 @@ export class FeishuAdapter implements ChannelAdapter {
     return { topicRootId };
   }
 
-  private async createHistoryCard(message: string): Promise<string> {
-    const [firstLine = "历史对话", ...remainingLines] = message.split("\n");
-    const title = firstLine.trim().slice(0, 80) || "历史对话";
-    const content = sanitizeHistoryCardMarkdown(remainingLines.join("\n").trim() || message.trim());
-    const card = {
-      schema: "2.0",
-      config: { summary: { content: title } },
-      header: {
-        template: "blue",
-        title: { tag: "plain_text", content: title },
-      },
-      body: { elements: [{ tag: "markdown", content }] },
-    };
+  private async createHistoryCard(turn: ConversationTurnView): Promise<string> {
+    const card = createConversationTurnCard(turn);
     const created = await this.client.cardkit.v1.card.create({
       data: { type: "card_json", data: JSON.stringify(card) },
     });
@@ -707,24 +693,20 @@ export class FeishuAdapter implements ChannelAdapter {
     chatId: string;
     replyToMessageId?: string | null;
     title: string;
-    initialText: string;
+    userText: string;
+    assistantText: string;
+    attachments?: Array<{ name: string; type: "image" | "file" }>;
   }): Promise<{ streamId: string; messageId: string }> {
     const elementId = "task_stream_content";
-    const card = {
-      schema: "2.0",
-      config: {
-        streaming_mode: true,
-        summary: { content: input.title.slice(0, 100) },
-        streaming_config: {
-          print_frequency_ms: { default: 60 },
-          print_step: { default: 1 },
-          print_strategy: "fast",
-        },
+    const card = createConversationTurnCard(
+      {
+        title: input.title,
+        userText: input.userText,
+        assistantText: input.assistantText,
+        ...(input.attachments ? { attachments: input.attachments } : {}),
       },
-      body: {
-        elements: [{ tag: "markdown", element_id: elementId, content: input.initialText }],
-      },
-    };
+      { streaming: true, assistantElementId: elementId },
+    );
     const created = await this.client.cardkit.v1.card.create({
       data: { type: "card_json", data: JSON.stringify(card) },
     });
@@ -756,7 +738,11 @@ export class FeishuAdapter implements ChannelAdapter {
     const sequence = ++stream.sequence;
     const response = await this.client.cardkit.v1.cardElement.content({
       path: { card_id: streamId, element_id: stream.elementId },
-      data: { content: content.slice(-30_000), sequence, uuid: `task-${streamId}-${sequence}` },
+      data: {
+        content: renderAssistantCardMarkdown(content.slice(-30_000)),
+        sequence,
+        uuid: `task-${streamId}-${sequence}`,
+      },
     });
     if (response.code !== 0) {
       throw new Error(`Feishu task stream update failed: ${response.msg ?? response.code}`);

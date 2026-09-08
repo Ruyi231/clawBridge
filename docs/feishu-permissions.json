@@ -1,7 +1,9 @@
 {
   "scopes": {
     "tenant": [
+      "bitable:app",
       "cardkit:card:write",
+      "drive:media:download",
       "im:chat.members:read",
       "im:chat.members:write_only",
       "im:chat:create",

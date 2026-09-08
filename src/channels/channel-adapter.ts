@@ -1,11 +1,20 @@
 import type { InboundEvent, OutboundMessage } from "../core/types.js";
 
+export interface ConversationTurnView {
+  title: string;
+  userText: string;
+  assistantText: string;
+  attachments?: Array<{ name: string; type: "image" | "file" }>;
+}
+
 export interface ChannelAdapter {
   start(onEvent: (event: InboundEvent) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
   send(message: OutboundMessage): Promise<string>;
   /** Replace a bot-authored interactive card without sending a new chat message. */
   updateCardMessage?(messageId: string, card: Record<string, unknown>): Promise<void>;
+  /** Withdraw a bot-authored message, used when moving controls below the latest turn. */
+  deleteMessage?(messageId: string): Promise<void>;
   onFatalError?(handler: (error: Error) => void): void;
   createProjectSpace?(input: {
     projectId: string;
@@ -27,13 +36,15 @@ export interface ChannelAdapter {
     chatId: string;
     title: string;
     idempotencyKey: string;
-    historyMessages?: string[];
+    historyTurns?: ConversationTurnView[];
   }): Promise<{ topicRootId: string }>;
   startTaskStream?(input: {
     chatId: string;
     replyToMessageId?: string | null;
     title: string;
-    initialText: string;
+    userText: string;
+    assistantText: string;
+    attachments?: Array<{ name: string; type: "image" | "file" }>;
   }): Promise<{ streamId: string; messageId: string }>;
   updateTaskStream?(streamId: string, content: string): Promise<void>;
   finishTaskStream?(streamId: string, summary: string): Promise<void>;

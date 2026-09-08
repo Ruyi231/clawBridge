@@ -129,6 +129,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   model TEXT,
   reasoning_effort TEXT,
   attachments_json TEXT NOT NULL DEFAULT '[]',
+  codex_turn_id TEXT,
+  final_text TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   error TEXT
@@ -151,6 +153,20 @@ CREATE TABLE IF NOT EXISTS inbound_events (
   received_at TEXT NOT NULL,
   recorded_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS composer_sessions (
+  token TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  chat_type TEXT NOT NULL CHECK(chat_type IN ('p2p', 'group')),
+  topic_root_id TEXT,
+  sender_open_id TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_composer_sessions_expires
+ON composer_sessions(expires_at, consumed_at);
 
 CREATE TABLE IF NOT EXISTS thread_leases (
   thread_id TEXT PRIMARY KEY,
@@ -182,6 +198,17 @@ export interface ProjectRecord {
   name: string;
   rootPath: string;
   enabled: boolean;
+}
+
+export interface ComposerSessionRecord {
+  token: string;
+  chatId: string;
+  chatType: "p2p" | "group";
+  topicRootId: string | null;
+  senderOpenId: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  createdAt: string;
 }
 
 export type DesktopProjectSyncState = "pending" | "synced" | "removed";
@@ -327,6 +354,8 @@ interface TaskRow {
   model: string | null;
   reasoning_effort: string | null;
   attachments_json: string;
+  codex_turn_id: string | null;
+  final_text: string | null;
   created_at: string;
   updated_at: string;
   error: string | null;
@@ -365,6 +394,8 @@ function toTask(row: TaskRow): TaskRecord {
     model: row.model,
     reasoningEffort: row.reasoning_effort,
     attachments: JSON.parse(row.attachments_json) as TaskRecord["attachments"],
+    codexTurnId: row.codex_turn_id,
+    finalText: row.final_text,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     error: row.error,
@@ -500,6 +531,8 @@ export class BridgeDatabase {
     this.migratePendingFeishuTopics();
     this.migrateDesktopProjectSync();
     this.migrateFeishuThreadToolbar();
+    this.migrateTaskTurnTranscript();
+    this.migrateComposerSessions();
   }
 
   close(): void {
@@ -523,6 +556,119 @@ export class BridgeDatabase {
         new Date().toISOString(),
       );
     return result.changes === 1;
+  }
+
+  createComposerSession(input: {
+    token: string;
+    chatId: string;
+    chatType: "p2p" | "group";
+    topicRootId?: string;
+    senderOpenId: string;
+    expiresAt: string;
+  }): ComposerSessionRecord {
+    const createdAt = new Date().toISOString();
+    this.database
+      .prepare(
+        `INSERT INTO composer_sessions(
+          token, chat_id, chat_type, topic_root_id, sender_open_id, expires_at, created_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.token,
+        input.chatId,
+        input.chatType,
+        input.topicRootId ?? null,
+        input.senderOpenId,
+        input.expiresAt,
+        createdAt,
+      );
+    return this.getComposerSession(input.token)!;
+  }
+
+  invalidateComposerSessions(senderOpenId: string): number {
+    return this.database
+      .prepare(
+        "UPDATE composer_sessions SET consumed_at=? WHERE sender_open_id=? AND consumed_at IS NULL",
+      )
+      .run(new Date().toISOString(), senderOpenId).changes;
+  }
+
+  getLatestActiveComposerSession(senderOpenId: string): ComposerSessionRecord | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM composer_sessions
+         WHERE sender_open_id=? AND consumed_at IS NULL AND expires_at>?
+         ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      )
+      .get(senderOpenId, new Date().toISOString()) as
+      | {
+          token: string;
+          chat_id: string;
+          chat_type: "p2p" | "group";
+          topic_root_id: string | null;
+          sender_open_id: string;
+          expires_at: string;
+          consumed_at: string | null;
+          created_at: string;
+        }
+      | undefined;
+    return row
+      ? {
+          token: row.token,
+          chatId: row.chat_id,
+          chatType: row.chat_type,
+          topicRootId: row.topic_root_id,
+          senderOpenId: row.sender_open_id,
+          expiresAt: row.expires_at,
+          consumedAt: row.consumed_at,
+          createdAt: row.created_at,
+        }
+      : undefined;
+  }
+
+  getComposerSession(token: string): ComposerSessionRecord | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM composer_sessions WHERE token=?")
+      .get(token) as
+      | {
+          token: string;
+          chat_id: string;
+          chat_type: "p2p" | "group";
+          topic_root_id: string | null;
+          sender_open_id: string;
+          expires_at: string;
+          consumed_at: string | null;
+          created_at: string;
+        }
+      | undefined;
+    return row
+      ? {
+          token: row.token,
+          chatId: row.chat_id,
+          chatType: row.chat_type,
+          topicRootId: row.topic_root_id,
+          senderOpenId: row.sender_open_id,
+          expiresAt: row.expires_at,
+          consumedAt: row.consumed_at,
+          createdAt: row.created_at,
+        }
+      : undefined;
+  }
+
+  consumeComposerSession(token: string): boolean {
+    return (
+      this.database
+        .prepare(
+          "UPDATE composer_sessions SET consumed_at=? WHERE token=? AND consumed_at IS NULL AND expires_at>?",
+        )
+        .run(new Date().toISOString(), token, new Date().toISOString()).changes === 1
+    );
+  }
+
+  pruneComposerSessions(): number {
+    return this.database
+      .prepare("DELETE FROM composer_sessions WHERE expires_at<? OR consumed_at IS NOT NULL")
+      .run(new Date().toISOString()).changes;
   }
 
   syncProjects(
@@ -1474,6 +1620,13 @@ export class BridgeDatabase {
     return row ? toTask(row) : undefined;
   }
 
+  getTaskByEventId(eventId: string): TaskRecord | undefined {
+    const row = this.database.prepare("SELECT * FROM tasks WHERE event_id = ?").get(eventId) as
+      | TaskRow
+      | undefined;
+    return row ? toTask(row) : undefined;
+  }
+
   nextQueued(): TaskRecord | undefined {
     const row = this.database
       .prepare("SELECT * FROM tasks WHERE state = 'queued' ORDER BY created_at LIMIT 1")
@@ -1540,7 +1693,12 @@ export class BridgeDatabase {
   updateTask(
     taskId: string,
     state: TaskState,
-    values: { threadId?: string; error?: string | null } = {},
+    values: {
+      threadId?: string;
+      error?: string | null;
+      codexTurnId?: string;
+      finalText?: string;
+    } = {},
   ): void {
     this.database
       .prepare(
@@ -1548,6 +1706,8 @@ export class BridgeDatabase {
       UPDATE tasks
       SET state = @state,
           thread_id = COALESCE(@threadId, thread_id),
+          codex_turn_id = COALESCE(@codexTurnId, codex_turn_id),
+          final_text = COALESCE(@finalText, final_text),
           error = @error,
           updated_at = @updatedAt
       WHERE task_id = @taskId
@@ -1557,6 +1717,8 @@ export class BridgeDatabase {
         taskId,
         state,
         threadId: values.threadId ?? null,
+        codexTurnId: values.codexTurnId ?? null,
+        finalText: values.finalText ?? null,
         error: values.error ?? null,
         updatedAt: new Date().toISOString(),
       });
@@ -1577,6 +1739,13 @@ export class BridgeDatabase {
       : (this.database
           .prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?")
           .all(limit) as TaskRow[]);
+    return rows.map(toTask);
+  }
+
+  listTasksForThread(threadId: string): TaskRecord[] {
+    const rows = this.database
+      .prepare("SELECT * FROM tasks WHERE thread_id=? ORDER BY created_at")
+      .all(threadId) as TaskRow[];
     return rows.map(toTask);
   }
 
@@ -2231,6 +2400,48 @@ export class BridgeDatabase {
     }
     this.database
       .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(13, ?)")
+      .run(new Date().toISOString());
+  }
+
+  private migrateTaskTurnTranscript(): void {
+    const applied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 14")
+      .get();
+    if (applied) return;
+    const columns = new Set(
+      (this.database.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!columns.has("codex_turn_id"))
+      this.database.exec("ALTER TABLE tasks ADD COLUMN codex_turn_id TEXT");
+    if (!columns.has("final_text"))
+      this.database.exec("ALTER TABLE tasks ADD COLUMN final_text TEXT");
+    this.database.exec("CREATE INDEX IF NOT EXISTS idx_tasks_codex_turn ON tasks(codex_turn_id)");
+    this.database
+      .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(14, ?)")
+      .run(new Date().toISOString());
+  }
+
+  private migrateComposerSessions(): void {
+    const applied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 15")
+      .get();
+    if (applied) return;
+    this.database.exec(`CREATE TABLE IF NOT EXISTS composer_sessions (
+      token TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      chat_type TEXT NOT NULL CHECK(chat_type IN ('p2p', 'group')),
+      topic_root_id TEXT,
+      sender_open_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      consumed_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_composer_sessions_expires
+      ON composer_sessions(expires_at, consumed_at);`);
+    this.database
+      .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(15, ?)")
       .run(new Date().toISOString());
   }
 }
