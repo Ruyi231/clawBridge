@@ -543,6 +543,7 @@ export class Bridge {
               type,
               ...(type === "image" && source !== "local" ? { imageKey: key } : {}),
               ...(type === "image" && source === "local" && localPath ? { localPath } : {}),
+              ...(type === "image" && source === "local" ? { driveFileToken: key } : {}),
             })),
           });
           streamId = stream.streamId;
@@ -2128,6 +2129,7 @@ export class Bridge {
                 name,
                 type,
                 ...(type === "image" && source !== "local" ? { imageKey: key } : {}),
+                ...(type === "image" && source === "local" ? { driveFileToken: key } : {}),
               })),
             }
           : {}),

@@ -23,6 +23,7 @@ const larkMocks = vi.hoisted(() => ({
   updateCardSettings: vi.fn(),
   uploadImage: vi.fn(),
   uploadFile: vi.fn(),
+  downloadDriveMedia: vi.fn(),
   wsStart: vi.fn(),
   wsClose: vi.fn(),
   handlers: {} as Record<string, (payload: unknown) => unknown>,
@@ -69,6 +70,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
         cardElement: { content: larkMocks.updateCardContent },
       },
     };
+    readonly drive = { media: { download: larkMocks.downloadDriveMedia } };
   },
   WSClient: class {
     constructor(options: Record<string, unknown>) {
@@ -143,6 +145,9 @@ describe("Feishu adapter card contract", () => {
     larkMocks.updateCardSettings.mockResolvedValue({ code: 0 });
     larkMocks.uploadImage.mockResolvedValue({ image_key: "img-uploaded-1" });
     larkMocks.uploadFile.mockResolvedValue({ file_key: "file-uploaded-1" });
+    larkMocks.downloadDriveMedia.mockResolvedValue({
+      writeFile: async (targetPath: string) => writeFile(targetPath, "image"),
+    });
     larkMocks.wsStart.mockImplementation(() => {
       (larkMocks.wsOptions.onReady as (() => void) | undefined)?.();
     });
@@ -811,6 +816,13 @@ describe("Feishu adapter card contract", () => {
             title: "第 1 轮",
             userText: "生成产物",
             assistantText: "已生成历史产物。",
+            attachments: [
+              {
+                name: "question.png",
+                type: "image",
+                driveFileToken: "bitable-image-token",
+              },
+            ],
             localArtifacts: [
               { path: imagePath, name: "history.png", type: "image", size: 5 },
               { path: filePath, name: "history.pdf", type: "file", size: 6 },
@@ -824,7 +836,11 @@ describe("Feishu adapter card contract", () => {
       };
       const card = JSON.parse(request.data.data);
       expect(JSON.stringify(card)).toContain('"img_key":"img-uploaded-1"');
+      expect(JSON.stringify(card)).toContain("本轮图片预览（1）");
       expect(JSON.stringify(card)).toContain("history.pdf · 已发送为下方附件");
+      expect(larkMocks.downloadDriveMedia).toHaveBeenCalledWith({
+        path: { file_token: "bitable-image-token" },
+      });
       expect(larkMocks.replyMessage).toHaveBeenCalledWith({
         path: { message_id: "om-sent-1" },
         data: {

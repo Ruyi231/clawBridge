@@ -1,7 +1,8 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Logger } from "pino";
 import type {
@@ -506,11 +507,29 @@ export class FeishuAdapter implements ChannelAdapter {
     if (!attachments?.length) return undefined;
     return Promise.all(
       attachments.map(async (attachment) => {
-        if (attachment.type !== "image" || attachment.imageKey || !attachment.localPath) {
+        if (attachment.type !== "image" || attachment.imageKey) {
           return attachment;
         }
         try {
-          return { ...attachment, imageKey: await this.uploadImage(attachment.localPath) };
+          if (attachment.localPath) {
+            return { ...attachment, imageKey: await this.uploadImage(attachment.localPath) };
+          }
+          if (attachment.driveFileToken) {
+            const directory = await mkdtemp(path.join(tmpdir(), "clawbridge-history-image-"));
+            const targetPath = path.join(directory, "image.bin");
+            try {
+              const download = await this.callApi("下载飞书历史图片", () =>
+                this.client.drive.media.download({
+                  path: { file_token: attachment.driveFileToken! },
+                }),
+              );
+              await download.writeFile(targetPath);
+              return { ...attachment, imageKey: await this.uploadImage(targetPath) };
+            } finally {
+              await rm(directory, { recursive: true, force: true });
+            }
+          }
+          return attachment;
         } catch (error) {
           this.logger.warn(
             { err: error, attachmentName: attachment.name },

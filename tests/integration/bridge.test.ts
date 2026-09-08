@@ -620,7 +620,12 @@ describe("Bridge vertical slice", () => {
         expect.objectContaining({
           userText: "一起分析",
           attachments: [
-            { name: "photo.png", type: "image", localPath: imagePath },
+            {
+              name: "photo.png",
+              type: "image",
+              localPath: imagePath,
+              driveFileToken: "local-image",
+            },
             { name: "notes.md", type: "file" },
           ],
         }),
@@ -1778,7 +1783,13 @@ describe("Bridge vertical slice", () => {
       title: "第 1 轮",
       userText: "历史问题",
       assistantText: expect.stringContaining("历史答案"),
-      attachments: [{ name: "现场照片.jpg", type: "image" }],
+      attachments: [
+        {
+          name: "现场照片.jpg",
+          type: "image",
+          imageKey: "history-image",
+        },
+      ],
       localArtifacts: [
         expect.objectContaining({ name: "package.json", type: "file", path: expect.any(String) }),
       ],

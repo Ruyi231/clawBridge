@@ -8,6 +8,8 @@ export interface ConversationAttachmentView {
   imageKey?: string;
   /** Composer-downloaded image that the adapter may upload for preview. */
   localPath?: string;
+  /** Bitable attachment token used to rebuild a preview after local cleanup. */
+  driveFileToken?: string;
 }
 
 export interface ConversationArtifactView {
