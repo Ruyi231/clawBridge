@@ -1,14 +1,6 @@
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ChannelAdapter } from "../../src/channels/channel-adapter.js";
@@ -731,7 +723,6 @@ describe("Bridge vertical slice", () => {
     const projectRoot = mkdtempSync(path.join(tmpdir(), "clawbridge-project-output-"));
     const outputPath = path.join(projectRoot, "result.png");
     writeFileSync(outputPath, "image");
-    const resolvedOutputPath = realpathSync(outputPath);
     vi.mocked(codex.runTurn).mockImplementationOnce(async (input) => {
       input.onStarted?.({ threadId: "thread-bridge", turnId: "turn-bridge" });
       return {
@@ -762,13 +753,17 @@ describe("Bridge vertical slice", () => {
           finalText: expect.stringContaining("result.png"),
           artifacts: [
             expect.objectContaining({
-              path: resolvedOutputPath,
+              path: expect.any(String),
               name: "result.png",
               type: "image",
             }),
           ],
         }),
       );
+      const finishCall = vi.mocked(channel.finishTaskStream!).mock.calls.at(-1);
+      const finalizedArtifactPath = finishCall?.[1].artifacts?.[0]?.path;
+      expect(finalizedArtifactPath).toBeDefined();
+      await expect(areSameResolvedPath(finalizedArtifactPath!, outputPath)).resolves.toBe(true);
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }
