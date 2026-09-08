@@ -1,11 +1,25 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 
-const [appToken, requestedTableId, mode] = process.argv.slice(2);
+const args = process.argv.slice(2);
+const valueAfter = (flag) => {
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] : undefined;
+};
+const dedicated = args.includes("--dedicated");
+const positional = args.filter(
+  (value, index) =>
+    !value.startsWith("--") &&
+    (index === 0 || !["--app-token", "--table-id"].includes(args[index - 1])),
+);
+const appToken = valueAfter("--app-token") ?? positional[0];
+const requestedTableId = valueAfter("--table-id") ?? positional[1];
 let tableId = requestedTableId;
 const appId = process.env.CLAWBRIDGE_FEISHU_APP_ID?.trim();
 const appSecret = process.env.CLAWBRIDGE_FEISHU_APP_SECRET?.trim();
-if (!appToken || !tableId || !appId || !appSecret) {
-  throw new Error("Bitable IDs and ClawBridge Feishu credentials are required");
+if (!appToken || (!dedicated && !tableId) || !appId || !appSecret) {
+  throw new Error(
+    "Usage: configure-native-composer-form.mjs --app-token <appToken> (--dedicated | --table-id <tableId>); ClawBridge Feishu credentials are also required",
+  );
 }
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {}, trace() {} };
@@ -26,7 +40,7 @@ async function call(label, operation) {
   }
 }
 
-if (mode === "--dedicated") {
+if (dedicated) {
   const tableName = "ClawBridge 组合发送数据";
   const tables = await call("Unable to list Bitable tables", () =>
     client.bitable.appTable.list({ path: { app_token: appToken }, params: { page_size: 100 } }),

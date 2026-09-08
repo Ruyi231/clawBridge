@@ -17,8 +17,10 @@
 可以让配置脚本在已有多维表格应用中创建专用数据表、原生表单和所需字段：
 
 ```powershell
-node scripts/configure-native-composer-form.mjs --app-token <appToken> --dedicated
+.\scripts\configure-native-composer-form.ps1 -AppToken <appToken> -Dedicated
 ```
+
+该 PowerShell 入口读取 ClawBridge Manager 已用 DPAPI 保存的凭据，不会要求把 App Secret 写入命令行。若希望在现有数据表中创建表单，使用 `-AppToken <appToken> -TableId <tableId>`。脚本最终输出 `tableId`、`formId` 和 `formUrl`；将其中的 `tableId` 与 `formUrl` 写入本机配置。
 
 脚本会创建或复用以下字段，并只在表单中展示 `消息内容` 和 `附件`：
 

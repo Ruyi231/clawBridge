@@ -2,7 +2,7 @@
 
 ClawBridge 是一个运行在 Windows 本机的单用户控制桥：它通过飞书长连接接收手机消息，将任务送入本机 Codex App Server，再把结果发回飞书。电脑无需开放公网端口。
 
-当前版本为 **ClawBridge 2.5.1**。仓库已完成 Phase 0–2 以及 ClawBridge 2.0-A/B/C/D/E 的本地实现：除原有单聊控制台、项目/对话管理和持久队列外，还增加了项目群/对话话题隔离、任务中心、CardKit 流式任务卡、卡片新建项目、按对话保存模型与推理强度、命令/文件审批和 Codex 提问卡片，以及图片与受限文档附件输入。2.5.1 为每个对话话题持久保存唯一的模型工具栏消息，后续任务完成时只原位更新，不再重复发送“切换模型”卡片；原卡失效时才补发并绑定替代卡。2.5.0 改为由 Codex Desktop 决定飞书项目的启用生命周期：Bridge 只在 Desktop 完全关闭后登记新项目，Desktop 中移除项目会自动在飞书停用，重新加入同一目录则恢复；全程不提供飞书删除入口，也不删除目录、对话或项目群。
+当前版本为 **ClawBridge 2.6.0**。仓库已完成 Phase 0–2 以及 ClawBridge 2.0-A/B/C/D/E 的本地实现：除原有单聊控制台、项目/对话管理和持久队列外，还增加了项目群/对话话题隔离、任务中心、CardKit 流式任务卡、卡片新建项目、按对话保存模型与推理强度、命令/文件审批和 Codex 提问卡片，以及图片与受限文档附件输入。2.6.0 增加飞书原生组合表单、用户输入图片预览、Codex 项目内图片/文件回传，以及普通飞书图片和 Bitable 表单图片的历史恢复。2.5.1 为每个对话话题持久保存唯一的模型工具栏消息，后续任务完成时只原位更新，不再重复发送“切换模型”卡片；原卡失效时才补发并绑定替代卡。2.5.0 改为由 Codex Desktop 决定飞书项目的启用生命周期：Bridge 只在 Desktop 完全关闭后登记新项目，Desktop 中移除项目会自动在飞书停用，重新加入同一目录则恢复；全程不提供飞书删除入口，也不删除目录、对话或项目群。
 
 ## 环境要求
 
@@ -110,6 +110,77 @@ Open ID 输入框旁的“如何获取？”包含两种流程：已安装飞书
 4. 回调配置也使用长连接并添加 `card.action.trigger`。
 5. 每次修改权限、事件或回调后都要创建并发布新版本。
 6. Open ID 属于具体飞书应用；换 App ID 后必须重新查询，不能照抄其他部署的 `ou_...`。
+
+### 当前版本完整启用步骤
+
+下面是从新安装到启用“文字 + 多图 + 多文件组合输入、输入图片预览、Codex 产物回传和历史图片恢复”的完整顺序。升级旧版本时，也可以从第 1 步开始逐项复核。
+
+1. 在飞书开放平台创建企业自建应用，开启机器人能力，并把可用范围限制为实际操作者。
+2. 在“权限管理”中批量导入 [`docs/feishu-permissions.json`](docs/feishu-permissions.json)。当前清单包含普通消息与群消息、CardKit、项目群生命周期、消息资源下载，以及组合表单所需的 `bitable:app`、`drive:media:download`。导入后创建并发布一个新版本。
+3. 在“事件与回调”中选择长连接：事件添加 `im.message.receive_v1`，回调添加 `card.action.trigger`，然后再次发布应用版本。整个方案只需要本机主动连接飞书，不需要公网 HTTPS、Cloudflare Tunnel 或本机入站端口。
+4. 运行 `ClawBridge Manager.vbs`，填写 App ID、App Secret 和唯一操作者 Open ID，点击“保存并应用”。凭据由当前 Windows 用户的 DPAPI 加密保存，不要把密钥写入 YAML 或提交到 Git。
+5. 新建或选择一个多维表格，把该企业自建应用添加为协作者或高级权限成员，确保它可以读写记录及读取附件。应用后台权限和表格自身访问权缺一不可。
+6. 在多维表格地址中取得 `appToken`。若使用现有数据表，还要取得 URL 查询参数中的 `tableId`；若希望脚本创建专用数据表，则只需要 `appToken`。
+7. 使用管理器已保存的 DPAPI 凭据创建并发布飞书原生表单，不需要在命令行输入 App Secret：
+
+   ```powershell
+   # 推荐：创建或复用专用数据表、字段和表单
+   .\scripts\configure-native-composer-form.ps1 -AppToken <appToken> -Dedicated
+
+   # 或者：在已有数据表中创建或复用字段和表单
+   .\scripts\configure-native-composer-form.ps1 -AppToken <appToken> -TableId <tableId>
+   ```
+
+   记录脚本输出的 `tableId` 和 `formUrl`。表单中只展示“消息内容”和“附件”；`ClawBridge会话`、`处理状态`、`错误信息`作为内部字段隐藏。
+
+8. 编辑不会纳入 Git 的 `config/local.yaml`。保留原有 `feishu`、`codex` 和 `projectsFile` 配置，并确认下面这些新增或关键项：
+
+   ```yaml
+   bridge:
+     databasePath: ./data/clawbridge.db
+     attachmentDirectory: ./data/attachments
+     attachmentMaxBytes: 20971520
+     outputArtifacts:
+       enabled: true
+       maxFiles: 10
+
+   composer:
+     enabled: true
+     routingMode: singleActive
+     formUrl: https://你的租户.feishu.cn/share/base/原生表单ID
+     appToken: 你的AppToken
+     tableId: tbl_xxx
+     pollIntervalMs: 5000
+     maxFiles: 20
+     tokenTtlMinutes: 30
+
+   projectManagement:
+     allowedRoots:
+       - D:/CodexWorkspace
+     allowCreateDirectory: true
+     allowRegisterExisting: true
+     codexDesktopProjects:
+       enabled: true
+       registerCreatedProjects: true
+   ```
+
+   `allowedRoots` 必须改成这台电脑实际用于保存项目的窄范围父目录。只想复用 Desktop 项目、不允许飞书新建或导入目录时，可以把两个 `allow*` 选项和 `registerCreatedProjects` 设为 `false`。
+
+9. 诊断、构建并重启实际运行的私有实例：
+
+   ```powershell
+   .\scripts\doctor.ps1
+   .\scripts\restart.ps1 -Build
+   .\scripts\status.ps1
+   ```
+
+   最后一条应显示 `running healthy=true`。源码改动后必须再次执行 `restart.ps1 -Build`，仅在飞书后台发布应用不会更新本机代码。
+
+10. 在飞书中按顺序验收：单聊机器人发送“菜单”→ 选择项目 → 打开项目群 → 新建或继续对话 → 在话题中点击“组合发送”→ 同时提交文字、两张图片和一个文件。轮次卡上方应显示用户文字、图片缩略预览和附件清单，下方应流式显示回答；模型/组合发送工具条应位于最新回答之后。
+11. 验收 Codex 回传：让 Codex 在当前项目目录中生成一张图片和一个文件，并要求它在最终回答中使用 Markdown 明确链接这些文件。项目内图片会嵌入回答卡片，其他文件会作为同一话题的原生附件发送。没有出现在最终回答链接中的文件不会被自动上传。
+12. 验收历史恢复：选择一个尚未在飞书创建话题的历史 Codex 对话。普通飞书图片使用原消息图片 Key 恢复；组合表单图片使用保存的 Bitable `file_token` 从飞书云端重新下载并生成预览；仍然存在的 Codex 项目内产物也会重新上传。仅退出后重新加入项目群会复用旧话题，不会改写已经发送的旧卡片。
+
+如果第 7 步失败，先检查应用是否已经被加入目标多维表格并具有读写权限；如果组合记录能创建但 Bridge 不处理，检查 `appToken`、`tableId`、字段名和应用版本；如果只有图片预览失败，检查 `drive:media:download`、`im:resource` 和机器人能力。更详细的字段、状态和并发路由说明见[飞书云端组合发送页](docs/FEISHU_CLOUD_COMPOSER.md)。
 
 启动前运行诊断：
 
